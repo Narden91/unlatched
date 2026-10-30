@@ -1,0 +1,16 @@
+/target
+Cargo.lock
+
+# Generated reports
+safe_door_report.json
+safe_door_report.md
+*report*.json
+*report*.md
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
