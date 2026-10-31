@@ -255,6 +255,9 @@ pub struct ScanSnapshot {
     /// Collector failures. A non-empty list means the counts below may be too low.
     #[serde(default)]
     pub scan_warnings: Vec<String>,
+    /// Sockets whose program path is unknown, usually because the scan is not elevated.
+    #[serde(default)]
+    pub sockets_without_exe: usize,
     pub total_connections: usize,
     pub listening_ports: usize,
     pub established_connections: usize,

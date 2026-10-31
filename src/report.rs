@@ -37,6 +37,12 @@ pub fn export_markdown_report(snapshot: &ScanSnapshot, path: &Path) -> Result<()
     for w in &snapshot.scan_warnings {
         md.push_str(&format!("- **Warning:** {}\n", w));
     }
+    if snapshot.sockets_without_exe > 0 {
+        md.push_str(&format!(
+            "- **Coverage:** program path unknown for {} of {} sockets\n",
+            snapshot.sockets_without_exe, snapshot.total_connections
+        ));
+    }
     md.push('\n');
 
     md.push_str("## Summary\n\n");
@@ -177,10 +183,18 @@ pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
         snapshot.critical_count, snapshot.high_count, snapshot.medium_count, snapshot.low_count
     );
 
+    if snapshot.sockets_without_exe > 0 {
+        println!(
+            "  {yellow}Program path unknown for {} of {} sockets{}{reset}",
+            snapshot.sockets_without_exe,
+            snapshot.total_connections,
+            if snapshot.is_elevated { "." } else { ". Run as Administrator/root for full coverage." }
+        );
+    }
     for w in &snapshot.scan_warnings {
         println!("  {bold}{red}WARNING: {w}{reset}");
     }
-    if !snapshot.scan_warnings.is_empty() {
+    if snapshot.sockets_without_exe > 0 || !snapshot.scan_warnings.is_empty() {
         println!();
     }
 

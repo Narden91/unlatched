@@ -91,6 +91,7 @@ impl ScannerEngine {
                 .then_with(|| a.name.cmp(&b.name))
         });
 
+        let sockets_without_exe = connections.iter().filter(|c| c.exe_path.is_empty()).count();
         let total_connections = connections.len();
         let listening_ports = connections.iter().filter(|c| c.is_listening()).count();
         let established_connections = connections.iter().filter(|c| c.is_established()).count();
@@ -148,6 +149,7 @@ impl ScannerEngine {
             security_score,
             security_grade,
             scan_warnings,
+            sockets_without_exe,
             total_connections,
             listening_ports,
             established_connections,

@@ -18,7 +18,7 @@ use std::time::Duration;
 #[derive(Parser, Debug)]
 #[command(
     name = "safe_door_scanner",
-    version = "0.1.0",
+    version,
     about = "Unlatched: local socket inspector"
 )]
 struct CliArgs {

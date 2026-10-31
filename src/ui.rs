@@ -140,6 +140,17 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Style::default().fg(COL_MUTED),
         ),
+        Span::styled(
+            if snap.sockets_without_exe > 0 {
+                format!(
+                    " | No exe path: {}/{}",
+                    snap.sockets_without_exe, snap.total_connections
+                )
+            } else {
+                String::new()
+            },
+            Style::default().fg(COL_MED),
+        ),
     ]);
 
     let block = Block::default()
@@ -1227,4 +1238,56 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scanner::ScannerEngine;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    const TABS: [ActiveTab; 5] = [
+        ActiveTab::Overview,
+        ActiveTab::Connections,
+        ActiveTab::Findings,
+        ActiveTab::Audit,
+        ActiveTab::Processes,
+    ];
+
+    /// Draws every tab and both modals on real scan data, at a normal and two tiny sizes.
+    /// Tiny terminals are where layout arithmetic panics.
+    #[test]
+    fn every_tab_and_modal_renders_without_panic() {
+        let mut engine = ScannerEngine::new();
+        let snapshot = engine.perform_scan();
+        let mut app = App::new(engine, snapshot);
+
+        for (w, h) in [(140, 40), (60, 15), (20, 5)] {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            for tab in TABS {
+                app.active_tab = tab;
+                terminal.draw(|f| render(f, &mut app)).unwrap();
+                app.show_help_modal = true;
+                terminal.draw(|f| render(f, &mut app)).unwrap();
+                app.show_help_modal = false;
+                app.show_detail_modal = true;
+                terminal.draw(|f| render(f, &mut app)).unwrap();
+                app.show_detail_modal = false;
+            }
+        }
+    }
+
+    #[test]
+    fn header_shows_brand_and_warning_badge() {
+        let mut engine = ScannerEngine::new();
+        let mut snapshot = engine.perform_scan();
+        snapshot.scan_warnings = vec!["Socket enumeration failed: test".to_string()];
+        let mut app = App::new(engine, snapshot);
+
+        let mut terminal = Terminal::new(TestBackend::new(200, 40)).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("UNLATCHED"));
+        assert!(screen.contains("INCOMPLETE: Socket enumeration failed"));
+    }
 }

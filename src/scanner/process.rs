@@ -223,7 +223,8 @@ pub fn compute_cached_sha256(
         }
         hasher.update(&buf[..n]);
     }
-    let digest = format!("{:x}", hasher.finalize());
+    // sha2 0.11 digests no longer implement LowerHex.
+    let digest: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
 
     cache.insert(
         exe_path.to_string(),
@@ -235,4 +236,23 @@ pub fn compute_cached_sha256(
     );
 
     Some(digest)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_matches_known_vector_and_uses_cache() {
+        let path = std::env::temp_dir().join(format!("unlatched_sha_test_{}", std::process::id()));
+        std::fs::write(&path, b"abc").unwrap();
+        let exe = path.to_string_lossy().into_owned();
+        let mut cache = HashMap::new();
+
+        let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert_eq!(compute_cached_sha256(&exe, &mut cache).as_deref(), Some(expected));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(compute_cached_sha256(&exe, &mut cache).as_deref(), Some(expected));
+        std::fs::remove_file(&path).unwrap();
+    }
 }

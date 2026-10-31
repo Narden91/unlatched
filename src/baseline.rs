@@ -256,6 +256,7 @@ mod tests {
             security_score: 100,
             security_grade: "A+".to_string(),
             scan_warnings: Vec::new(),
+            sockets_without_exe: 0,
             total_connections: connections.len(),
             listening_ports: 0,
             established_connections: 0,

@@ -377,5 +377,10 @@ mod tests {
         let missing = "Server:  router.lan\nAddress:  192.168.1.1\n\n*** router.lan can't find 203.0.113.7: Non-existent domain\n";
         assert_eq!(parse_nslookup_name(missing), None);
         assert_eq!(parse_nslookup_name(""), None);
+        // Each guard needs an input the other one lets through.
+        let starred = "Server:  r\nAddress:  1.1.1.1\n\n*** timeout:expired\n";
+        assert_eq!(parse_nslookup_name(starred), None);
+        let spaced = "Server:  r\nAddress:  1.1.1.1\n\nDNS request timed out: timeout was 2 seconds.\n";
+        assert_eq!(parse_nslookup_name(spaced), None);
     }
 }
