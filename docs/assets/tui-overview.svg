@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 760" role="img" aria-labelledby="title desc">
+  <title id="title">Unlatched TUI overview</title>
+  <desc id="desc">Overview tab: security score, socket counts, findings, and listening ports.</desc>
+  <defs>
+    <style>
+      .mono { font-family: "Cascadia Code", "JetBrains Mono", "Consolas", "ui-monospace", monospace; }
+    </style>
+  </defs>
+
+  <rect width="1280" height="760" rx="14" fill="#020617"/>
+  <rect x="10" y="10" width="1260" height="740" rx="10" fill="#0b1220" stroke="#22d3ee" stroke-width="1.4"/>
+
+  <!-- Header -->
+  <rect x="22" y="22" width="1236" height="52" rx="4" fill="none" stroke="#22d3ee" stroke-width="1.2"/>
+  <rect x="34" y="34" width="132" height="28" rx="3" fill="#22d3ee"/>
+  <text x="100" y="53" text-anchor="middle" class="mono" font-size="14" font-weight="700" fill="#020617">UNLATCHED</text>
+  <rect x="176" y="34" width="118" height="28" rx="3" fill="#34d399"/>
+  <text x="235" y="53" text-anchor="middle" class="mono" font-size="12" font-weight="700" fill="#020617">[ADMIN/ROOT]</text>
+  <text x="310" y="53" class="mono" font-size="14" font-weight="700" fill="#f8fafc">Host: demo-host (Windows 11)</text>
+  <text x="678" y="53" class="mono" font-size="14" fill="#94a3b8">|  Score:</text>
+  <text x="758" y="53" class="mono" font-size="14" font-weight="700" fill="#facd15">71/100 [C]</text>
+  <text x="888" y="53" class="mono" font-size="13" fill="#94a3b8">|  Scan: 48ms (3s) @ 13:51:02</text>
+
+  <!-- Tabs -->
+  <rect x="22" y="82" width="1236" height="44" rx="4" fill="none" stroke="#334155" stroke-width="1.2"/>
+  <rect x="36" y="92" width="132" height="24" rx="3" fill="#22d3ee"/>
+  <text x="102" y="109" text-anchor="middle" class="mono" font-size="13" font-weight="700" fill="#020617">[1] Overview</text>
+  <text x="248" y="109" text-anchor="middle" class="mono" font-size="13" fill="#94a3b8">[2] Connections</text>
+  <text x="348" y="109" class="mono" font-size="13" fill="#22d3ee">(86)</text>
+  <text x="430" y="109" class="mono" font-size="13" fill="#94a3b8">[3] Findings</text>
+  <text x="530" y="109" class="mono" font-size="13" fill="#ff4b4b">(4)</text>
+  <text x="610" y="109" class="mono" font-size="13" fill="#94a3b8">[4] OS Audit</text>
+  <text x="708" y="109" class="mono" font-size="13" fill="#facd15">(14)</text>
+  <text x="800" y="109" class="mono" font-size="13" fill="#94a3b8">[5] Processes</text>
+  <text x="1240" y="109" text-anchor="end" class="mono" font-size="12" fill="#94a3b8">View: All | Sort: Risk</text>
+
+  <!-- Score gauge -->
+  <rect x="22" y="136" width="410" height="92" rx="4" fill="none" stroke="#facd15" stroke-width="1.2"/>
+  <text x="42" y="158" class="mono" font-size="13" fill="#facd15"> Security Score </text>
+  <rect x="42" y="172" width="370" height="22" rx="3" fill="#0f172a"/>
+  <rect x="42" y="172" width="263" height="22" rx="3" fill="#facd15"/>
+  <text x="227" y="188" text-anchor="middle" class="mono" font-size="13" font-weight="700" fill="#020617">71/100 - C</text>
+  <text x="42" y="212" class="mono" font-size="12" fill="#94a3b8">Weighted triage grade, not a compliance rating.</text>
+
+  <!-- Socket stats -->
+  <rect x="444" y="136" width="406" height="92" rx="4" fill="none" stroke="#334155" stroke-width="1.2"/>
+  <text x="464" y="158" class="mono" font-size="13" fill="#94a3b8"> Sockets </text>
+  <text x="464" y="184" class="mono" font-size="13" fill="#94a3b8">Active Sockets :</text>
+  <text x="610" y="184" class="mono" font-size="13" font-weight="700" fill="#f8fafc">86</text>
+  <text x="660" y="184" class="mono" font-size="13" fill="#94a3b8">Listening :</text>
+  <text x="762" y="184" class="mono" font-size="13" font-weight="700" fill="#22d3ee">11</text>
+  <text x="464" y="208" class="mono" font-size="13" fill="#94a3b8">Established    :</text>
+  <text x="610" y="208" class="mono" font-size="13" font-weight="700" fill="#34d399">54</text>
+  <text x="660" y="208" class="mono" font-size="13" fill="#94a3b8">Public IP :</text>
+  <text x="762" y="208" class="mono" font-size="13" font-weight="700" fill="#facd15">7</text>
+
+  <!-- Findings counts -->
+  <rect x="862" y="136" width="396" height="92" rx="4" fill="none" stroke="#334155" stroke-width="1.2"/>
+  <text x="882" y="158" class="mono" font-size="13" fill="#94a3b8"> Findings </text>
+  <text x="882" y="184" class="mono" font-size="13" fill="#ff4b4b">CRIT 1</text>
+  <text x="972" y="184" class="mono" font-size="13" fill="#ff9132">HIGH 2</text>
+  <text x="1062" y="184" class="mono" font-size="13" fill="#facd15">MED 1</text>
+  <text x="1148" y="184" class="mono" font-size="13" fill="#38bdf8">LOW 0</text>
+  <text x="882" y="212" class="mono" font-size="13" fill="#94a3b8">Flagged connections:</text>
+  <text x="1078" y="212" class="mono" font-size="13" font-weight="700" fill="#ff9132">3</text>
+
+  <!-- Findings table -->
+  <rect x="22" y="240" width="618" height="448" rx="4" fill="none" stroke="#334155" stroke-width="1.2"/>
+  <text x="42" y="262" class="mono" font-size="13" fill="#94a3b8"> Security Findings (Tab [3]) </text>
+  <text x="42" y="292" class="mono" font-size="12" font-weight="700" fill="#22d3ee">SEVERITY   RULE ID              SUMMARY</text>
+  <text x="42" y="322" class="mono" font-size="13" font-weight="700" fill="#ff4b4b">CRITICAL</text>
+  <text x="142" y="322" class="mono" font-size="13" fill="#e2e8f0">AUD-FW-DISABLED      Public firewall profile OFF</text>
+  <text x="42" y="350" class="mono" font-size="13" font-weight="700" fill="#ff9132">HIGH</text>
+  <text x="142" y="350" class="mono" font-size="13" fill="#e2e8f0">H06-EXPOSED-SERVICE  redis-server on 0.0.0.0:6379</text>
+  <text x="42" y="378" class="mono" font-size="13" font-weight="700" fill="#ff9132">HIGH</text>
+  <text x="142" y="378" class="mono" font-size="13" fill="#e2e8f0">H02-TEMP-EXEC        python.exe running from %TEMP%</text>
+  <text x="42" y="406" class="mono" font-size="13" font-weight="700" fill="#facd15">MEDIUM</text>
+  <text x="142" y="406" class="mono" font-size="13" fill="#e2e8f0">H05-BACKDOOR-PORT    Listener on 4444 (common C2)</text>
+  <text x="42" y="450" class="mono" font-size="12" fill="#64748b">Enter or d opens the finding with MITRE ID,</text>
+  <text x="42" y="470" class="mono" font-size="12" fill="#64748b">evidence, and a suggested fix.</text>
+
+  <!-- Listening ports table -->
+  <rect x="652" y="240" width="606" height="448" rx="4" fill="none" stroke="#334155" stroke-width="1.2"/>
+  <text x="672" y="262" class="mono" font-size="13" fill="#94a3b8"> Listening Ports (Tab [2]) </text>
+  <text x="672" y="292" class="mono" font-size="12" font-weight="700" fill="#22d3ee">RISK      PROTO  LOCAL PORT           PROCESS          SCOPE</text>
+  <text x="672" y="322" class="mono" font-size="13" font-weight="700" fill="#ff9132">HIGH</text>
+  <text x="752" y="322" class="mono" font-size="13" fill="#e2e8f0">TCP    0.0.0.0:6379         redis-server     WILDCARD</text>
+  <text x="672" y="350" class="mono" font-size="13" font-weight="700" fill="#facd15">MEDIUM</text>
+  <text x="752" y="350" class="mono" font-size="13" fill="#e2e8f0">TCP    0.0.0.0:4444         python.exe       WILDCARD</text>
+  <text x="672" y="378" class="mono" font-size="13" font-weight="700" fill="#34d399">SAFE</text>
+  <text x="752" y="378" class="mono" font-size="13" fill="#e2e8f0">TCP    127.0.0.1:5432       postgres         LOOPBACK</text>
+  <text x="672" y="406" class="mono" font-size="13" font-weight="700" fill="#34d399">SAFE</text>
+  <text x="752" y="406" class="mono" font-size="13" fill="#e2e8f0">TCP    127.0.0.1:3000       node.exe         LOOPBACK</text>
+  <text x="672" y="434" class="mono" font-size="13" font-weight="700" fill="#38bdf8">LOW</text>
+  <text x="752" y="434" class="mono" font-size="13" fill="#e2e8f0">TCP    192.168.1.20:3389    svchost.exe      LAN</text>
+  <text x="672" y="462" class="mono" font-size="13" font-weight="700" fill="#34d399">SAFE</text>
+  <text x="752" y="462" class="mono" font-size="13" fill="#e2e8f0">TCP    [::]:22              sshd             WILDCARD</text>
+  <text x="672" y="490" class="mono" font-size="13" font-weight="700" fill="#34d399">SAFE</text>
+  <text x="752" y="490" class="mono" font-size="13" fill="#e2e8f0">UDP    0.0.0.0:5353         mDNS             WILDCARD</text>
+  <text x="672" y="534" class="mono" font-size="12" fill="#64748b">Scope: LOOPBACK, LAN, or WILDCARD (0.0.0.0 / ::).</text>
+
+  <!-- Footer -->
+  <text x="36" y="722" class="mono" font-size="13" font-weight="700" fill="#22d3ee">[1-5/Tab]</text>
+  <text x="126" y="722" class="mono" font-size="13" fill="#cbd5e1">View</text>
+  <text x="186" y="722" class="mono" font-size="13" font-weight="700" fill="#22d3ee">[f]</text>
+  <text x="216" y="722" class="mono" font-size="13" fill="#cbd5e1">Filter</text>
+  <text x="286" y="722" class="mono" font-size="13" font-weight="700" fill="#22d3ee">[r]</text>
+  <text x="316" y="722" class="mono" font-size="13" fill="#cbd5e1">Rescan</text>
+  <text x="396" y="722" class="mono" font-size="13" font-weight="700" fill="#22d3ee">[e]</text>
+  <text x="426" y="722" class="mono" font-size="13" fill="#cbd5e1">Export</text>
+  <text x="506" y="722" class="mono" font-size="13" font-weight="700" fill="#22d3ee">[?]</text>
+  <text x="536" y="722" class="mono" font-size="13" fill="#cbd5e1">Help</text>
+  <text x="596" y="722" class="mono" font-size="13" font-weight="700" fill="#22d3ee">[q]</text>
+  <text x="626" y="722" class="mono" font-size="13" fill="#cbd5e1">Quit</text>
+</svg>

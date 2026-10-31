@@ -97,7 +97,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 
     let line = Line::from(vec![
         Span::styled(
-            " SAFE DOOR SCANNER ",
+            " UNLATCHED ",
             Style::default()
                 .fg(Color::Black)
                 .bg(COL_ACCENT)

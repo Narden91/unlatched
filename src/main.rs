@@ -22,7 +22,7 @@ use std::time::Duration;
 #[command(
     name = "safe_door_scanner",
     version = "0.1.0",
-    about = "Cross-platform network socket, listening port, and host security scanner"
+    about = "Unlatched: local socket inspector and host-security scanner"
 )]
 struct CliArgs {
     /// Run a one-shot scan in the terminal instead of launching the TUI

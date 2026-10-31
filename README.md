@@ -1,80 +1,164 @@
-# safe_door_scanner
+<p align="center">
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-edition%202021-orange?logo=rust&amp;logoColor=white" alt="Rust edition 2021"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-yellow.svg" alt="MIT license"></a>
+  <a href="#windows"><img src="https://img.shields.io/badge/Windows-supported-0078D6?logo=windows&amp;logoColor=white" alt="Windows supported"></a>
+  <a href="#linux"><img src="https://img.shields.io/badge/Linux-supported-FCC624?logo=linux&amp;logoColor=black" alt="Linux supported"></a>
+  <a href="https://github.com/ratatui/ratatui"><img src="https://img.shields.io/badge/UI-ratatui-22d3ee" alt="ratatui TUI"></a>
+  <img src="https://img.shields.io/badge/version-0.1.0-blue" alt="version 0.1.0">
+  <a href="https://github.com/Narden91/safe_door_scanner/stargazers"><img src="https://img.shields.io/github/stars/Narden91/safe_door_scanner?style=flat" alt="GitHub stars"></a>
+</p>
 
-Cross-platform (Linux and Windows) network socket monitor, port scanner, and local host security auditor written in Rust.
+<h1 align="center">Unlatched</h1>
 
-It inspects active TCP/UDP sockets, maps them to processes and parent process chains, hashes network-facing binaries, and checks for common backdoor indicators and persistence mechanisms.
+<p align="center"><strong>Local socket inspector and host-security TUI for Linux and Windows.</strong><br>
+Binary and crate name: <code>safe_door_scanner</code></p>
 
-## Features
+<p align="center">
+  <img src="docs/assets/tui-overview.png" alt="Unlatched overview tab: security score, findings, and listening ports" width="100%">
+  <br>
+  <sub>Overview tab. Sample host, not a live capture.</sub>
+</p>
 
-- **Socket & Port Inspection**: Lists TCP/UDP (IPv4 and IPv6) sockets, connection states, exposure scope (`127.0.0.1`, LAN, `0.0.0.0`/`::`), owning PID, command line, parent process chain, SHA-256 binary digest, and background reverse DNS lookups.
-- **Process & Socket Heuristics**:
-  - `H01`: Interactive shells (`sh`, `bash`, `cmd.exe`, `powershell`) or socket relays (`nc`, `ncat`, `socat`) directly bound to network sockets, plus inline scripting reverse shells.
-  - `H02`: Binaries executing from temporary or world-writable directories (`/tmp`, `/var/tmp`, `/dev/shm`, `%TEMP%`, `Users\Public`, `$Recycle.Bin`).
-  - `H03`: Processes running from unlinked/deleted binaries on disk or `memfd` descriptors.
-  - `H04`: System process path spoofing (`svchost.exe`, `lsass.exe`, `csrss.exe` outside `System32`/`SysWOW64`), process name typosquats, and userland binaries spoofing Linux kernel thread names (`[kworker/...]`).
-  - `H05`: Connections or listeners on common backdoor, RAT, C2, or mining ports (`4444`, `31337`, `1337`, `5555`, `2375`, `6666-6669`, `3333`, `14444`).
-  - `H06`: Sensitive services (SMB, RDP, Telnet, Redis, MySQL, PostgreSQL, MongoDB, Docker API, VNC) bound to `0.0.0.0`/`::`, and web/database servers spawning command shells.
-  - `H07`: Encoded PowerShell commands (`-EncodedCommand`), download cradles (`IEX`/`DownloadString`), `/dev/tcp` redirections, and LOLBin remote script execution (`mshta`, `regsvr32`, `rundll32`).
-- **Host & Persistence Audit**:
-  - **Windows**: Windows Defender Firewall profile status (Domain, Private, Public), Registry `Run`/`RunOnce` keys, `Winlogon\Shell`, and Startup folders.
-  - **Linux**: `ufw`/`nftables`/`iptables` status, `/etc/ld.so.preload`, `/etc/crontab`, `/etc/rc.local`, `/etc/systemd/system/*.service`, and `/etc/ssh/sshd_config`.
-  - **Cross-platform**: `hosts` file inspection for security or update domain overrides.
+Unlatched lists every TCP and UDP socket on the machine you are sitting at, maps it to a PID, and walks the parent chain. A shell owning a socket, `svchost.exe` running from the wrong folder, Redis bound to `0.0.0.0`: each of those lands in the TUI with a rule ID, a MITRE technique, and a suggested fix.
 
-## Build
+You run it on the host you want to inspect. It does not probe other machines.
 
-Requires a standard Rust toolchain (`cargo`):
+The security score is a weighted triage grade from those heuristics. It is not a certification, and it is not antivirus.
 
-```bash
+## What it checks
+
+Sockets first. Each row carries state, exposure (`127.0.0.1`, LAN, `0.0.0.0`/`::`), owning process, command line, parent lineage, SHA-256 of the on-disk binary, and a background reverse DNS lookup.
+
+Then seven connection and process rules:
+
+| ID | What trips it |
+| :--- | :--- |
+| `H01` | Interactive shells (`sh`, `bash`, `cmd.exe`, `powershell`) or relays (`nc`, `ncat`, `socat`) bound to a socket, plus inline scripting reverse shells |
+| `H02` | Binaries executing from temp or world-writable paths (`/tmp`, `/var/tmp`, `/dev/shm`, `%TEMP%`, `Users\Public`, `$Recycle.Bin`) |
+| `H03` | Process image unlinked on disk, or backed by a `memfd` descriptor |
+| `H04` | Path spoofing (`svchost.exe` / `lsass.exe` / `csrss.exe` outside `System32`/`SysWOW64`), typosquats, userland binaries posing as Linux kernel threads (`[kworker/...]`) |
+| `H05` | Listeners or connections on common backdoor / RAT / C2 / miner ports (`4444`, `31337`, `1337`, `5555`, `2375`, `6666-6669`, `3333`, `14444`) |
+| `H06` | Sensitive services (SMB, RDP, Telnet, Redis, MySQL, PostgreSQL, MongoDB, Docker API, VNC) bound to `0.0.0.0`/`::`; web or database servers spawning shells |
+| `H07` | Encoded PowerShell (`-EncodedCommand`), download cradles (`IEX`/`DownloadString`), `/dev/tcp` redirects, LOLBin remote script execution (`mshta`, `regsvr32`, `rundll32`) |
+
+`H05` is port-based. A legitimate service on `4444` will still flag. Read the process path before you kill anything.
+
+Host audit is OS-specific. Both sides also inspect the `hosts` file for redirects of update or security domains.
+
+## Windows
+
+Needs a Rust toolchain with the MSVC ABI ([rustup](https://rustup.rs/) plus the Visual Studio C++ build tools). Clone, then from PowerShell:
+
+```powershell
+git clone https://github.com/Narden91/safe_door_scanner.git
+cd safe_door_scanner
 cargo build --release
 ```
 
-The compiled binary is placed at `target/release/safe_door_scanner` (or `target\release\safe_door_scanner.exe` on Windows).
+Binary: `target\release\safe_door_scanner.exe`
 
-Run with elevated privileges (`sudo` on Linux or Administrator terminal on Windows) for full kernel socket-to-PID mapping and system binary inspection.
+Open an **Administrator** terminal if you want full kernel socket-to-PID mapping, SHA-256 of system binaries, HKLM Run keys, and Windows Defender Firewall profile state. A standard user still gets a usable scan; some rows will lack a PID and some audit checks will be incomplete.
 
-## Usage
+```powershell
+# Interactive TUI
+.\target\release\safe_door_scanner.exe
 
-Launch the interactive TUI (default):
+# One-shot summary
+.\target\release\safe_door_scanner.exe --cli
 
-```bash
-safe_door_scanner
+# Flagged sockets only
+.\target\release\safe_door_scanner.exe --cli --flagged
+
+# Markdown + JSON reports
+.\target\release\safe_door_scanner.exe --cli --export-md unlatched.md --export-json unlatched.json
+
+# Raw snapshot on stdout
+.\target\release\safe_door_scanner.exe --json
 ```
 
-Run a one-shot CLI scan:
+Windows audit coverage:
+
+- Defender Firewall Domain / Private / Public profiles (`EnableFirewall` under `HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\...`)
+- Autostart: `HKCU`/`HKLM` `Run` and `RunOnce`, plus `HKLM\...\WOW6432Node\...\Run`
+- `Winlogon\Shell` (anything other than `explorer.exe` is treated as critical)
+- User and common Startup folders
+- `C:\Windows\System32\drivers\etc\hosts`
+
+## Linux
+
+Needs `rustc`/`cargo` from [rustup](https://rustup.rs/) or your distro packages. No extra C libraries.
 
 ```bash
-# Summary output in terminal
-safe_door_scanner --cli
-
-# Show only flagged connections
-safe_door_scanner --cli --flagged
-
-# Export Markdown and JSON reports
-safe_door_scanner --cli --export-md report.md --export-json report.json
-
-# Print raw JSON to stdout
-safe_door_scanner --json
+git clone https://github.com/Narden91/safe_door_scanner.git
+cd safe_door_scanner
+cargo build --release
 ```
 
-In CLI mode, the process exits with code `2` if any `CRITICAL` findings are detected.
+Binary: `target/release/safe_door_scanner`
 
-## TUI Keybindings
+Run under **root** (`sudo`) for `/proc` socket owners, `/etc/ld.so.preload`, crontab, sshd, and systemd unit inspection. Unprivileged mode still lists sockets you can see; several audit files will be skipped.
+
+```bash
+# Interactive TUI
+sudo ./target/release/safe_door_scanner
+
+# One-shot summary
+sudo ./target/release/safe_door_scanner --cli
+
+# Flagged sockets only
+sudo ./target/release/safe_door_scanner --cli --flagged
+
+# Markdown + JSON reports
+sudo ./target/release/safe_door_scanner --cli --export-md unlatched.md --export-json unlatched.json
+
+# Raw snapshot on stdout
+sudo ./target/release/safe_door_scanner --json
+```
+
+Linux audit coverage:
+
+- UFW (`/etc/ufw/ufw.conf`) and nftables/iptables kernel modules
+- `/etc/ld.so.preload`
+- `/etc/crontab` and `/etc/rc.local`
+- `/etc/ssh/sshd_config` (`PermitRootLogin`, `PermitEmptyPasswords`)
+- `/etc/systemd/system/*.service` `ExecStart=` lines
+- `/etc/hosts`
+
+macOS is not supported.
+
+## TUI
+
+Launch with no flags. Tabs: Overview, Connections, Findings, OS Audit, Processes.
 
 | Key | Action |
 | :--- | :--- |
-| `1` - `5`, `Tab`, `Shift+Tab` | Switch tabs (Overview, Connections, Findings, OS Audit, Processes) |
+| `1`–`5`, `Tab`, `Shift+Tab` | Switch tabs |
 | `Up` / `Down`, `j` / `k` | Move selection |
-| `PgUp` / `PgDn` | Move selection by 10 rows |
+| `PgUp` / `PgDn` | Jump 10 rows |
 | `f` | Cycle connection filter (All, Listening, Established, Public IP, Flagged) |
-| `s` | Cycle connection sort order (Risk, Port, Process, State, PID) |
-| `/` | Filter current table by search string |
-| `r` | Trigger immediate scan |
-| `a` | Cycle auto-refresh interval (`3s`, `10s`, `Paused`) |
-| `e` | Export `safe_door_report.json` and `safe_door_report.md` |
-| `Enter`, `d` | Toggle detail modal for selected row |
-| `?`, `h` | Toggle help modal |
+| `s` | Cycle sort (Risk, Port, Process, State, PID) |
+| `/` | Search the current table |
+| `r` | Scan now |
+| `a` | Auto-refresh `3s` / `10s` / Paused |
+| `e` | Write `safe_door_report.json` and `safe_door_report.md` |
+| `Enter`, `d` | Detail modal |
+| `?`, `h` | Help |
 | `q`, `Esc` | Close modal, clear search, or quit |
+
+## CLI
+
+`--cli` prints a summary and exits. Combine it with `--flagged` to hide clean sockets. `--json` dumps the full snapshot.
+
+Exit code `2` means at least one `CRITICAL` finding. `0` means the scan finished without critical hits (high/medium/low may still be present).
+
+## Limits
+
+Heuristics, not malware signatures. A renamed binary that does not match `H01`–`H07` will sail through. The score can look fine on a host that is already owned.
+
+Firewall and persistence checks read local config; they do not prove the kernel filter is actually dropping packets.
+
+Keep the binary name `safe_door_scanner` if you script against it. Unlatched is the product name.
 
 ## License
 
-MIT
+[MIT](LICENSE)

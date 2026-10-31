@@ -2,7 +2,7 @@
 name = "safe_door_scanner"
 version = "0.1.0"
 edition = "2021"
-description = "Cross-platform network socket, listening port, and host security scanner"
+description = "Unlatched: local socket inspector and host-security scanner"
 license = "MIT"
 
 [[bin]]

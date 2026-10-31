@@ -9,7 +9,7 @@ pub fn export_json_report(snapshot: &ScanSnapshot, path: &Path) -> Result<(), St
 
 pub fn export_markdown_report(snapshot: &ScanSnapshot, path: &Path) -> Result<(), String> {
     let mut md = String::with_capacity(8192);
-    md.push_str("# Safe Door Scanner - Security Report\n\n");
+    md.push_str("# Unlatched - Security Report\n\n");
     md.push_str(&format!(
         "- **Timestamp:** `{}`\n",
         snapshot.timestamp.format("%Y-%m-%d %H:%M:%S %z")
