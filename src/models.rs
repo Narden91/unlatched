@@ -241,6 +241,30 @@ pub struct AuditItem {
     pub details: String,
 }
 
+/// Characters a terminal or text viewer acts on instead of showing: C0/C1 controls (ESC starts
+/// cursor, erase and title sequences) and bidi controls (U+202E makes a name read backwards).
+fn is_unsafe_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// `None` when `s` is safe to print. Otherwise a copy with each unsafe char written as `\u{..}`,
+/// so the evidence stays readable but cannot drive the terminal.
+pub fn neutralized(s: &str) -> Option<String> {
+    if !s.chars().any(is_unsafe_char) {
+        return None;
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if is_unsafe_char(c) {
+            out.push_str(&format!("\\u{{{:x}}}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanSnapshot {
     pub timestamp: DateTime<Local>,
@@ -271,5 +295,85 @@ pub struct ScanSnapshot {
     pub findings: Vec<SecurityFinding>,
     pub audit_items: Vec<AuditItem>,
     pub processes: Vec<ProcessRecord>,
+}
+
+impl ScanSnapshot {
+    /// Make every text field safe to print. Run it after detection: the rules must see the
+    /// raw text, while the CLI, TUI and Markdown must not pass attacker bytes to a terminal.
+    pub fn neutralize_text(&mut self) {
+        fn fix(s: &mut String) {
+            if let Some(clean) = neutralized(s) {
+                *s = clean;
+            }
+        }
+        fn fix_opt(s: &mut Option<String>) {
+            if let Some(s) = s {
+                fix(s);
+            }
+        }
+        fn fix_all(v: &mut [String]) {
+            v.iter_mut().for_each(fix);
+        }
+
+        for s in [
+            &mut self.hostname,
+            &mut self.os_name,
+            &mut self.os_version,
+            &mut self.kernel_version,
+            &mut self.security_grade,
+        ] {
+            fix(s);
+        }
+        fix_all(&mut self.scan_warnings);
+        for c in &mut self.connections {
+            for s in [
+                &mut c.process_name,
+                &mut c.exe_path,
+                &mut c.cmdline,
+                &mut c.state,
+                &mut c.service_name,
+            ] {
+                fix(s);
+            }
+            fix_opt(&mut c.sha256);
+            fix_opt(&mut c.remote_hostname);
+            fix_all(&mut c.lineage);
+            fix_all(&mut c.risk_reasons);
+        }
+        for f in &mut self.findings {
+            for s in [
+                &mut f.rule_id,
+                &mut f.category,
+                &mut f.mitre_id,
+                &mut f.title,
+                &mut f.description,
+                &mut f.evidence,
+                &mut f.remediation,
+            ] {
+                fix(s);
+            }
+            fix_opt(&mut f.process_name);
+            fix_opt(&mut f.endpoint);
+        }
+        for a in &mut self.audit_items {
+            for s in [
+                &mut a.check_id,
+                &mut a.subsystem,
+                &mut a.name,
+                &mut a.location,
+                &mut a.value,
+                &mut a.details,
+            ] {
+                fix(s);
+            }
+        }
+        for p in &mut self.processes {
+            for s in [&mut p.name, &mut p.exe_path, &mut p.cmdline, &mut p.user] {
+                fix(s);
+            }
+            fix_opt(&mut p.sha256);
+            fix_all(&mut p.lineage);
+        }
+    }
 }
 

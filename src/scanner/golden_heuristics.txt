@@ -1,0 +1,29 @@
+H01-INLINE-SHELL Critical Some(1003)
+H01-RAW-RELAY Critical Some(1002)
+H01-REV-SHELL Critical Some(1001)
+H02-TEMP-EXEC High Some(2002)
+H02-TEMP-EXEC High Some(2003)
+H02-TEMP-EXEC High Some(2004)
+H02-TEMP-NET-EXEC Critical Some(1004)
+H03-FILELESS-BINARY Critical Some(2002)
+H04-MASQUERADING Critical Some(2003)
+H04-MASQUERADING Critical Some(2004)
+H04-MASQUERADING Critical Some(2008)
+H05-BACKDOOR-PORT Critical Some(1002)
+H05-OUTBOUND-C2-PORT Critical Some(1001)
+H05-OUTBOUND-C2-PORT High Some(1009)
+H06-EXPOSED-SERVICE Critical Some(1004)
+H06-SERVER-SHELL Critical Some(2001)
+H07-OBFUSCATED-CMD Critical Some(2001)
+H07-OBFUSCATED-CMD Critical Some(2007)
+H07-OBFUSCATED-CMD High Some(2005)
+H07-OBFUSCATED-CMD High Some(2006)
+conn1 Critical
+conn2 Critical
+conn3 Critical
+conn4 Critical
+conn5 Low
+conn6 Low
+conn7 Low
+conn8 Safe
+conn9 High

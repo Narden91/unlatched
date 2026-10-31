@@ -72,6 +72,17 @@ Linux audit reads UFW/`nf_tables`, `/etc/ld.so.preload`, `/etc/crontab`, `/etc/r
 
 macOS is out.
 
+## Running elevated
+
+Copy the binary to a folder that only administrators can write before you run it as Administrator or root, for example `C:\Program Files\Unlatched\` or `/usr/local/bin/`. In a user-writable folder such as `target\release`, any program running as that user can replace the binary itself.
+
+The scanner also limits what an attacker on the host can do to it:
+
+- It starts `nslookup` and `getent` by absolute path (Windows: the System32 folder from HKLM), not through the program folder or `PATH`.
+- On Windows it loads its static DLL imports from System32 only (`/DEPENDENTLOADFLAG:0x800` in `build.rs`, Windows 10 1607 or later). DLLs loaded at runtime are not covered by this flag.
+- Process names, command lines, registry values and DNS names can carry terminal escape sequences or bidi characters. The scan stores them as text (`\u{1b}`, `\u{202e}`), so the CLI, TUI, Markdown and JSON all show the escaped form, not the raw bytes.
+- Report export writes a new temp file and renames it into place, so a link planted at the report name is replaced, not followed.
+
 ## TUI
 
 No flags. Tabs are Overview, Connections, Findings, Audit, Processes.

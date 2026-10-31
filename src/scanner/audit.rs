@@ -688,17 +688,19 @@ fn hosts_override_level(ip: &str) -> (AuditStatus, Severity, &'static str) {
 }
 
 fn audit_hosts_file(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityFinding>) {
-    let hosts_path = if cfg!(windows) {
-        r"C:\Windows\System32\drivers\etc\hosts"
-    } else {
-        "/etc/hosts"
-    };
+    #[cfg(windows)]
+    let hosts_path = crate::scanner::system_root()
+        .join(r"System32\drivers\etc\hosts")
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(not(windows))]
+    let hosts_path = "/etc/hosts".to_string();
 
-    if !Path::new(hosts_path).exists() {
+    if !Path::new(&hosts_path).exists() {
         return;
     }
 
-    let Ok(content) = fs::read_to_string(hosts_path) else {
+    let Ok(content) = fs::read_to_string(&hosts_path) else {
         return;
     };
 

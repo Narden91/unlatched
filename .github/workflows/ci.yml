@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ubuntu compiles and tests the Linux-only code (audit, /proc, getent), which a
+        # Windows machine never builds.
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable --no-self-update && rustup default stable
+      - run: cargo build --locked
+      - run: cargo test --locked
+
+  lint:
+    runs-on: ubuntu-latest
+    # rustfmt and clippy have never run on this code. Make this job blocking once it is clean.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable --no-self-update && rustup default stable
+      - run: rustup component add clippy rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings

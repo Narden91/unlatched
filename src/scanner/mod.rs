@@ -12,6 +12,76 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use sysinfo::{System, Users};
 
+/// Windows folder read from HKLM, which only admins can write. `%SystemRoot%` is not used:
+/// a normal user can override environment variables, and this tool runs elevated.
+#[cfg(windows)]
+pub(crate) fn system_root() -> std::path::PathBuf {
+    use winreg::{enums::HKEY_LOCAL_MACHINE, RegKey};
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+        .and_then(|k| k.get_value::<String, _>("SystemRoot"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Windows"))
+}
+
+/// 100 minus each finding's penalty, floored at 0, plus a letter grade.
+/// The score counts findings. It does not measure how secure the host is.
+fn score_and_grade(findings: &[crate::models::SecurityFinding], incomplete: bool) -> (u8, String) {
+    let penalty: u32 = findings.iter().map(|f| f.severity.penalty_points()).sum();
+    let score = 100u32.saturating_sub(penalty) as u8;
+    let grade = if incomplete {
+        "INCOMPLETE"
+    } else {
+        match score {
+            95..=100 => "A+",
+            85..=94 => "A",
+            75..=84 => "B",
+            60..=74 => "C",
+            40..=59 => "D",
+            _ => "F",
+        }
+    };
+    (score, grade.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::SecurityFinding;
+
+    fn finding(severity: Severity) -> SecurityFinding {
+        SecurityFinding {
+            rule_id: "T".to_string(),
+            category: String::new(),
+            mitre_id: String::new(),
+            severity,
+            title: String::new(),
+            description: String::new(),
+            pid: None,
+            process_name: None,
+            endpoint: None,
+            evidence: String::new(),
+            remediation: String::new(),
+        }
+    }
+
+    #[test]
+    fn score_subtracts_penalties_and_floors_at_zero() {
+        use Severity::*;
+        let grade = |sevs: &[Severity], incomplete| {
+            let fs: Vec<_> = sevs.iter().map(|&s| finding(s)).collect();
+            score_and_grade(&fs, incomplete)
+        };
+        assert_eq!(grade(&[], false), (100, "A+".to_string()));
+        assert_eq!(grade(&[Critical], false), (70, "C".to_string()));
+        // The stock Windows host in this session: one High (SMB) and one Medium (RPC).
+        assert_eq!(grade(&[High, Medium], false), (79, "B".to_string()));
+        assert_eq!(grade(&[Low, Safe], false), (98, "A+".to_string()));
+        assert_eq!(grade(&[Critical; 4], false), (0, "F".to_string()));
+        assert_eq!(grade(&[], true), (100, "INCOMPLETE".to_string()));
+    }
+}
+
 pub struct ScannerEngine {
     sys: System,
     users: Users,
@@ -121,24 +191,10 @@ impl ScannerEngine {
             .filter(|f| f.severity == Severity::Low)
             .count();
 
-        let total_penalty: u32 = findings.iter().map(|f| f.severity.penalty_points()).sum();
-        let security_score = 100u32.saturating_sub(total_penalty) as u8;
-        // The score only counts findings. It does not measure how secure the host is.
-        let security_grade = if scan_warnings.is_empty() {
-            match security_score {
-                95..=100 => "A+",
-                85..=94 => "A",
-                75..=84 => "B",
-                60..=74 => "C",
-                40..=59 => "D",
-                _ => "F",
-            }
-        } else {
-            "INCOMPLETE"
-        }
-        .to_string();
+        let (security_score, security_grade) =
+            score_and_grade(&findings, !scan_warnings.is_empty());
 
-        ScanSnapshot {
+        let mut snapshot = ScanSnapshot {
             timestamp: Local::now(),
             scan_duration_ms: start.elapsed().as_millis(),
             hostname: self.hostname.clone(),
@@ -163,6 +219,9 @@ impl ScannerEngine {
             findings,
             audit_items,
             processes,
-        }
+        };
+        // After detection, which needs the raw text; before any output sees it.
+        snapshot.neutralize_text();
+        snapshot
     }
 }

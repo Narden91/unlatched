@@ -38,7 +38,9 @@ impl DnsCache {
                     Err(_) => return,
                 };
                 let Ok(ip) = next else { return };
-                let host = reverse_dns_lookup(ip);
+                // Whoever controls the remote IP writes its PTR record, so clean it on entry.
+                let host = reverse_dns_lookup(ip)
+                    .map(|h| crate::models::neutralized(&h).unwrap_or(h));
                 if let Ok(mut guard) = resolved_worker.lock() {
                     guard.insert(ip, host);
                 }
@@ -93,7 +95,7 @@ fn reverse_dns_lookup(ip: IpAddr) -> Option<String> {
         use std::os::windows::process::CommandExt;
         use std::process::Command;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let output = Command::new("nslookup")
+        let output = Command::new(nslookup_exe())
             .arg(ip.to_string())
             .creation_flags(CREATE_NO_WINDOW)
             .output()
@@ -103,7 +105,11 @@ fn reverse_dns_lookup(ip: IpAddr) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
-        let output = Command::new("getent")
+        // Absolute path: a PATH entry the user controls must not decide what root runs.
+        let getent = ["/usr/bin/getent", "/bin/getent"]
+            .into_iter()
+            .find(|p| std::path::Path::new(p).exists())?;
+        let output = Command::new(getent)
             .args(["hosts", &ip.to_string()])
             .output()
             .ok()?;
@@ -117,6 +123,15 @@ fn reverse_dns_lookup(ip: IpAddr) -> Option<String> {
     {
         None
     }
+}
+
+/// Absolute path, because a bare "nslookup" is searched in the scanner's own folder before
+/// System32. A user-writable build folder would then let a planted nslookup.exe run as admin.
+#[cfg(windows)]
+fn nslookup_exe() -> std::path::PathBuf {
+    crate::scanner::system_root()
+        .join("System32")
+        .join("nslookup.exe")
 }
 
 /// Read the answer line of `nslookup <ip>` without matching a localized "Name:" label.
@@ -370,6 +385,15 @@ mod tests {
         for out in [en, it, fr] {
             assert_eq!(parse_nslookup_name(out).as_deref(), Some("dns.google"));
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nslookup_is_spawned_from_system32_by_absolute_path() {
+        let exe = nslookup_exe();
+        assert!(exe.is_absolute(), "{}", exe.display());
+        assert!(exe.ends_with(r"System32\nslookup.exe"));
+        assert!(exe.exists(), "{}", exe.display());
     }
 
     #[test]

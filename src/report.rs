@@ -1,10 +1,40 @@
 use crate::models::{AuditStatus, ScanSnapshot, Severity};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
+
+/// Write through a new temp file and a rename. `fs::write` follows a link planted at `path`,
+/// so an elevated export into a folder another user controls would overwrite the link's
+/// target (for example a file in /etc/cron.d). `create_new` refuses any existing name, links
+/// included, and rename replaces the directory entry, not what a link points to.
+fn write_report(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("{}: not a file path", path.display()))?;
+    let tmp = dir.join(format!(".{}.{}.tmp", name.to_string_lossy(), std::process::id()));
+
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(contents).and_then(|_| f.sync_all()));
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("{}: {e}", tmp.display()));
+    }
+    fs::rename(&tmp, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("{}: {e} (is the file open in another program?)", path.display())
+    })
+}
 
 pub fn export_json_report(snapshot: &ScanSnapshot, path: &Path) -> Result<(), String> {
     let json = serde_json::to_string_pretty(snapshot).map_err(|e| e.to_string())?;
-    fs::write(path, json).map_err(|e| e.to_string())
+    write_report(path, json.as_bytes())
 }
 
 pub fn export_markdown_report(snapshot: &ScanSnapshot, path: &Path) -> Result<(), String> {
@@ -138,7 +168,7 @@ pub fn export_markdown_report(snapshot: &ScanSnapshot, path: &Path) -> Result<()
         ));
     }
 
-    fs::write(path, md).map_err(|e| e.to_string())
+    write_report(path, md.as_bytes())
 }
 
 pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
@@ -150,6 +180,14 @@ pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
     let red = "\x1b[31m";
     let magenta = "\x1b[35m";
     let dim = "\x1b[2m";
+
+    let severity_color = |s: Severity| match s {
+        Severity::Critical => red,
+        Severity::High => magenta,
+        Severity::Medium => yellow,
+        Severity::Low => cyan,
+        Severity::Safe => green,
+    };
 
     let score_color = match snapshot.security_score {
         85..=100 => green,
@@ -204,13 +242,7 @@ pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
         println!("  {green}Nothing flagged.{reset}\n");
     } else {
         for f in &snapshot.findings {
-            let sev_col = match f.severity {
-                Severity::Critical => red,
-                Severity::High => magenta,
-                Severity::Medium => yellow,
-                Severity::Low => cyan,
-                Severity::Safe => green,
-            };
+            let sev_col = severity_color(f.severity);
             println!(
                 "  {bold}{sev_col}[{:^8}]{reset} {bold}{}{reset} {dim}({} | {}){reset}",
                 f.severity.label(),
@@ -241,13 +273,7 @@ pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
         "RISK", "PROTO", "LOCAL ENDPOINT", "REMOTE ENDPOINT", "STATE", "PID", "PROCESS", "SERVICE"
     );
     for conn in filtered_conns.iter().take(45) {
-        let sev_col = match conn.severity {
-            Severity::Critical => red,
-            Severity::High => magenta,
-            Severity::Medium => yellow,
-            Severity::Low => cyan,
-            Severity::Safe => green,
-        };
+        let sev_col = severity_color(conn.severity);
         let local_ep = truncate_str(&conn.local_endpoint(), 23);
         let remote_ep = truncate_str(&conn.remote_endpoint(), 25);
         let proc_str = truncate_str(&conn.process_name, 17);
@@ -291,6 +317,52 @@ pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
         );
     }
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("unlatched_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn report_write_replaces_file_and_leaves_no_temp() {
+        let dir = scratch_dir("write");
+        let path = dir.join("report.md");
+        fs::write(&path, "old").unwrap();
+        write_report(&path, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "temp file left behind");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An elevated export must not write through a link planted at the report name.
+    #[test]
+    fn report_write_does_not_follow_planted_symlink() {
+        let dir = scratch_dir("link");
+        let victim = dir.join("victim.conf");
+        let link = dir.join("report.md");
+        fs::write(&victim, "precious").unwrap();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&victim, &link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&victim, &link);
+        if let Err(e) = made {
+            eprintln!("skipped: cannot create symlinks here ({e})");
+            fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        write_report(&link, b"report text").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        assert_eq!(fs::read_to_string(&link).unwrap(), "report text");
+        assert!(!fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 pub fn truncate_str(s: &str, max_chars: usize) -> String {

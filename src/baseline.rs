@@ -42,8 +42,11 @@ fn owner_key(exe_path: &str, name: &str) -> String {
 pub fn load(path: &Path) -> Result<ScanSnapshot, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     // Windows PowerShell redirects and `Out-File -Encoding utf8` write a BOM that serde_json rejects.
-    serde_json::from_str(text.trim_start_matches('\u{feff}'))
-        .map_err(|e| format!("{}: not a scan JSON ({e})", path.display()))
+    let mut snapshot: ScanSnapshot = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|e| format!("{}: not a scan JSON ({e})", path.display()))?;
+    // The baseline file is untrusted input too; its old hashes and names get printed.
+    snapshot.neutralize_text();
+    Ok(snapshot)
 }
 
 #[derive(Debug, Default)]
@@ -271,6 +274,63 @@ mod tests {
             audit_items,
             processes,
         }
+    }
+
+    /// Counts unsafe strings anywhere in the JSON form. It only finds fields the test below
+    /// fills with hostile text; a new text field needs a line there and in `neutralize_text`.
+    fn unsafe_strings(v: &serde_json::Value) -> usize {
+        match v {
+            serde_json::Value::String(s) => crate::models::neutralized(s).is_some() as usize,
+            serde_json::Value::Array(a) => a.iter().map(unsafe_strings).sum(),
+            serde_json::Value::Object(o) => o.values().map(unsafe_strings).sum(),
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn untrusted_text_is_neutralized_in_snapshot_and_baseline() {
+        // OSC title, cursor-up + erase-line (hides the line above), C1 CSI, and a U+202E name spoof.
+        let evil = "a\u{1b}]0;PWNED\u{7}\u{1b}[1A\u{1b}[2K\u{9b}2J\u{202e}txt.exe";
+        let mut conn = listener(1, 80, evil);
+        conn.cmdline = evil.to_string();
+        conn.remote_hostname = Some(evil.to_string());
+        conn.lineage = vec![evil.to_string()];
+        conn.risk_reasons = vec![evil.to_string()];
+        let mut proc_rec = process(1, evil, "abc");
+        proc_rec.name = evil.to_string();
+        proc_rec.cmdline = evil.to_string();
+        let mut item = autostart(evil);
+        item.name = evil.to_string();
+        let mut snap = snapshot(vec![conn], vec![proc_rec], vec![item]);
+        snap.hostname = evil.to_string();
+        snap.findings.push(crate::models::SecurityFinding {
+            rule_id: "H07".to_string(),
+            category: evil.to_string(),
+            mitre_id: "T1027".to_string(),
+            severity: Severity::High,
+            title: evil.to_string(),
+            description: evil.to_string(),
+            pid: Some(1),
+            process_name: Some(evil.to_string()),
+            endpoint: Some(evil.to_string()),
+            evidence: evil.to_string(),
+            remediation: evil.to_string(),
+        });
+
+        let raw = serde_json::to_value(&snap).unwrap();
+        assert!(unsafe_strings(&raw) > 10, "the test input must start unsafe");
+
+        let path = std::env::temp_dir().join(format!("unlatched_evil_{}.json", std::process::id()));
+        std::fs::write(&path, raw.to_string()).unwrap();
+        let loaded = load(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(unsafe_strings(&serde_json::to_value(&loaded).unwrap()), 0);
+
+        snap.neutralize_text();
+        assert_eq!(unsafe_strings(&serde_json::to_value(&snap).unwrap()), 0);
+        // The evidence stays readable as text.
+        assert!(snap.processes[0].cmdline.contains("\\u{1b}]0;PWNED"));
+        assert!(snap.processes[0].name.contains("\\u{202e}txt.exe"));
     }
 
     #[test]
