@@ -78,8 +78,13 @@ pub fn evaluate_security_heuristics(
 ) -> Vec<SecurityFinding> {
     let mut collector = FindingCollector::default();
 
+    let listen_ports: HashSet<u16> = connections
+        .iter()
+        .filter(|c| c.is_listening())
+        .map(|c| c.local_port)
+        .collect();
     for conn in connections.iter_mut() {
-        evaluate_connection(conn, &mut collector);
+        evaluate_connection(conn, &listen_ports, &mut collector);
     }
 
     for proc_rec in processes.values_mut() {
@@ -105,11 +110,18 @@ pub fn evaluate_security_heuristics(
     collector.items
 }
 
-fn evaluate_connection(conn: &mut ConnectionEntry, collector: &mut FindingCollector) {
+fn evaluate_connection(
+    conn: &mut ConnectionEntry,
+    listen_ports: &HashSet<u16>,
+    collector: &mut FindingCollector,
+) {
     let proc_lower = conn.process_name.to_lowercase();
     let exe_lower = conn.exe_path.to_lowercase().replace('/', "\\");
     let cmd_lower = conn.cmdline.to_lowercase();
     let is_listening = conn.is_listening();
+    // A connection on a port this host listens on is inbound. Its remote port is the
+    // peer's random source port, so the C2 port rule below must not read it.
+    let is_inbound = !is_listening && listen_ports.contains(&conn.local_port);
 
     if SHELL_NAMES.contains(&proc_lower.as_str()) {
         conn.elevate_severity(
@@ -282,7 +294,7 @@ fn evaluate_connection(conn: &mut ConnectionEntry, collector: &mut FindingCollec
         }
     }
 
-    if let Some(rem_port) = conn.remote_port {
+    if let Some(rem_port) = conn.remote_port.filter(|_| !is_inbound) {
         if let Some(intel) = check_backdoor_port(rem_port) {
             conn.elevate_severity(
                 intel.severity,
@@ -419,7 +431,7 @@ fn evaluate_process(proc_rec: &mut ProcessRecord, collector: &mut FindingCollect
     }
 
     if let Some((sev, reason)) =
-        check_process_masquerading(&name_lower, &exe_lower, &proc_rec.exe_path)
+        check_process_masquerading(&name_lower, &cmd_lower, &exe_lower, &proc_rec.exe_path)
     {
         if sev > proc_rec.max_severity {
             proc_rec.max_severity = sev;
@@ -622,6 +634,7 @@ fn check_suspicious_exec_path(raw_path: &str, exe_lower: &str) -> Option<String>
 
 fn check_process_masquerading(
     name_lower: &str,
+    cmd_lower: &str,
     exe_lower: &str,
     raw_exe: &str,
 ) -> Option<(Severity, String)> {
@@ -648,13 +661,17 @@ fn check_process_masquerading(
         }
     }
 
-    if (name_lower.starts_with("[kworker")
-        || name_lower.starts_with("[kthreadd")
-        || name_lower.starts_with("[ksoftirqd")
-        || name_lower.starts_with("[migration")
-        || name_lower.starts_with("[rcu_"))
-        && !raw_exe.is_empty()
-    {
+    // sysinfo fills `name` from comm, which has no brackets, and `exec -a` changes only argv[0].
+    // Check both. A real kernel thread has no exe, so a non-empty exe is the signal.
+    let looks_like_kthread = |s: &str| {
+        let s = s.trim_matches(&['[', ']'][..]);
+        s == "kthreadd"
+            || ["kworker/", "ksoftirqd/", "migration/", "rcu_"]
+                .iter()
+                .any(|p| s.starts_with(p))
+    };
+    let argv0 = cmd_lower.split_whitespace().next().unwrap_or("");
+    if !raw_exe.is_empty() && (looks_like_kthread(name_lower) || looks_like_kthread(argv0)) {
         return Some((
             Severity::Critical,
             format!(
@@ -877,5 +894,57 @@ mod tests {
         assert!(findings.iter().any(|f| f.rule_id == "H02-TEMP-EXEC" && f.pid == Some(6660)));
         assert!(findings.iter().any(|f| f.rule_id == "H03-FILELESS-BINARY" && f.pid == Some(7770)));
         assert!(findings.iter().any(|f| f.rule_id == "H04-MASQUERADING" && f.pid == Some(7770)));
+    }
+
+    #[test]
+    fn test_kernel_thread_masquerade_uses_comm_and_argv0() {
+        // sysinfo reports comm without brackets; `exec -a` only changes argv[0].
+        let by_argv0 = check_process_masquerading("x", "[kworker/0:0]", "\\tmp\\x", "/tmp/x");
+        assert_eq!(by_argv0.map(|r| r.0), Some(Severity::Critical));
+        let by_comm = check_process_masquerading("kworker/0:0", "/tmp/x", "\\tmp\\x", "/tmp/x");
+        assert_eq!(by_comm.map(|r| r.0), Some(Severity::Critical));
+        // A real kernel thread has no exe. A legitimate tool with a similar prefix is not flagged.
+        assert!(check_process_masquerading("kworker/0:1", "kworker/0:1", "", "").is_none());
+        let tool = "/usr/bin/migration-tool";
+        assert!(check_process_masquerading("migration-tool", tool, tool, tool).is_none());
+    }
+
+    fn socket(state: &str, local_port: u16, remote_port: Option<u16>) -> ConnectionEntry {
+        ConnectionEntry {
+            id: 1,
+            protocol: Protocol::Tcp,
+            local_ip: IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
+            local_port,
+            remote_ip: remote_port.map(|_| IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+            remote_port,
+            remote_hostname: None,
+            state: state.to_string(),
+            pid: Some(500),
+            process_name: "sshd".to_string(),
+            exe_path: "/usr/sbin/sshd".to_string(),
+            cmdline: "sshd".to_string(),
+            sha256: None,
+            lineage: Vec::new(),
+            service_name: "SSH".to_string(),
+            exposure: ExposureScope::LocalLan,
+            remote_category: IpCategory::PublicInternet,
+            severity: Severity::Safe,
+            risk_reasons: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn test_c2_port_rule_skips_inbound_connections() {
+        // 45560 is a mining-pool port, but here it is a client's random source port.
+        let mut inbound = vec![
+            socket("LISTEN", 22, None),
+            socket("ESTABLISHED", 22, Some(45560)),
+        ];
+        let findings = evaluate_security_heuristics(&mut inbound, &mut HashMap::new());
+        assert!(!findings.iter().any(|f| f.rule_id == "H05-OUTBOUND-C2-PORT"));
+
+        let mut outbound = vec![socket("ESTABLISHED", 51234, Some(45560))];
+        let findings = evaluate_security_heuristics(&mut outbound, &mut HashMap::new());
+        assert!(findings.iter().any(|f| f.rule_id == "H05-OUTBOUND-C2-PORT"));
     }
 }

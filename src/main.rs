@@ -1,4 +1,5 @@
 mod app;
+mod baseline;
 mod models;
 mod report;
 mod scanner;
@@ -6,11 +7,7 @@ mod ui;
 
 use app::{ActiveTab, App};
 use clap::Parser;
-use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use report::{export_json_report, export_markdown_report, print_cli_summary};
 use scanner::ScannerEngine;
@@ -44,13 +41,32 @@ struct CliArgs {
     /// Write a JSON security report to the given path
     #[arg(long, value_name = "FILE")]
     export_json: Option<PathBuf>,
+
+    /// Compare this scan with a JSON file from an earlier --export-json and list what changed
+    #[arg(long, value_name = "FILE")]
+    diff: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = CliArgs::parse();
 
+    let one_shot = args.cli
+        || args.json
+        || args.export_md.is_some()
+        || args.export_json.is_some()
+        || args.diff.is_some();
+
+    // Fail on a bad baseline before the scan, not after.
+    let old_snapshot = args.diff.as_deref().map(baseline::load).transpose()?;
+
     let mut engine = ScannerEngine::new();
-    let snapshot = engine.perform_scan();
+    let mut snapshot = engine.perform_scan();
+    if one_shot {
+        engine.refresh_hostnames(&mut snapshot, Duration::from_secs(2));
+    }
+    let diff = old_snapshot
+        .as_ref()
+        .map(|old| baseline::diff_snapshots(old, &snapshot));
 
     if let Some(md_path) = &args.export_md {
         export_markdown_report(&snapshot, md_path)?;
@@ -66,41 +82,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&snapshot)?);
-        return Ok(());
+    if !one_shot {
+        return run_tui(engine, snapshot);
     }
 
-    if args.cli || args.export_md.is_some() || args.export_json.is_some() {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        // stdout carries the JSON, so the diff goes to stderr.
+        if let Some(d) = &diff {
+            eprintln!("{}", d.render());
+        }
+    } else {
         if args.cli {
             print_cli_summary(&snapshot, args.flagged);
         }
-        if snapshot.critical_count > 0 {
-            std::process::exit(2);
+        if let Some(d) = &diff {
+            println!("{}", d.render());
         }
-        return Ok(());
     }
 
-    run_tui(engine, snapshot)
+    if snapshot.critical_count > 0 {
+        std::process::exit(2);
+    }
+    Ok(())
 }
 
 fn run_tui(
     engine: ScannerEngine,
     initial_snapshot: models::ScanSnapshot,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
+    // try_init installs a panic hook that restores the terminal, so a panic does not leave raw mode on.
+    let mut terminal = ratatui::try_init()?;
     let mut app = App::new(engine, initial_snapshot);
     let res = event_loop(&mut terminal, &mut app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
+    ratatui::restore();
     res
 }
 
@@ -207,11 +222,12 @@ fn event_loop(
                         app.set_status(format!("Sort: {}", app.conn_sort.label()));
                     }
                     KeyCode::Char('r') => {
-                        app.trigger_scan();
-                        app.set_status(format!(
-                            "Scan completed in {} ms",
-                            app.snapshot.scan_duration_ms
-                        ));
+                        if app.is_scanning() {
+                            app.set_status("Scan already running");
+                        } else {
+                            app.trigger_scan();
+                            app.set_status("Scanning...");
+                        }
                     }
                     KeyCode::Char('a') => {
                         app.refresh_mode = app.refresh_mode.next();

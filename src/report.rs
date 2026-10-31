@@ -31,9 +31,13 @@ pub fn export_markdown_report(snapshot: &ScanSnapshot, path: &Path) -> Result<()
         snapshot.security_score, snapshot.security_grade
     ));
     md.push_str(&format!(
-        "- **Scan Duration:** `{} ms`\n\n",
+        "- **Scan Duration:** `{} ms`\n",
         snapshot.scan_duration_ms
     ));
+    for w in &snapshot.scan_warnings {
+        md.push_str(&format!("- **Warning:** {}\n", w));
+    }
+    md.push('\n');
 
     md.push_str("## Summary\n\n");
     md.push_str("| Metric | Count |\n| :--- | :---: |\n");
@@ -172,6 +176,13 @@ pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
         "  Findings       : {bold}{red}CRITICAL: {}{reset}  |  {bold}{magenta}HIGH: {}{reset}  |  {bold}{yellow}MEDIUM: {}{reset}  |  {dim}LOW: {}{reset}\n",
         snapshot.critical_count, snapshot.high_count, snapshot.medium_count, snapshot.low_count
     );
+
+    for w in &snapshot.scan_warnings {
+        println!("  {bold}{red}WARNING: {w}{reset}");
+    }
+    if !snapshot.scan_warnings.is_empty() {
+        println!();
+    }
 
     println!("{bold}{cyan}Findings ({}){reset}", snapshot.findings.len());
     println!("{dim}----------------------------------------------------------------------------------------{reset}");

@@ -252,6 +252,9 @@ pub struct ScanSnapshot {
     pub is_elevated: bool,
     pub security_score: u8,
     pub security_grade: String,
+    /// Collector failures. A non-empty list means the counts below may be too low.
+    #[serde(default)]
+    pub scan_warnings: Vec<String>,
     pub total_connections: usize,
     pub listening_ports: usize,
     pub established_connections: usize,

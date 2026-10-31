@@ -1,4 +1,5 @@
 use crate::app::{ActiveTab, App};
+use crate::baseline::socket_key;
 use crate::models::{AuditStatus, Severity};
 use crate::report::truncate_str;
 use ratatui::{
@@ -95,6 +96,18 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         )
     };
 
+    // A collector failed, so the counts may be too low. Say so instead of showing a clean score.
+    let warn_badge = match snap.scan_warnings.first() {
+        Some(w) => Span::styled(
+            format!(" [INCOMPLETE: {}] ", truncate_str(w, 60)),
+            Style::default()
+                .fg(Color::Black)
+                .bg(COL_CRIT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        None => Span::raw(""),
+    };
+
     let line = Line::from(vec![
         Span::styled(
             " UNLATCHED ",
@@ -105,6 +118,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw(" "),
         priv_badge,
+        warn_badge,
         Span::styled(
             format!(" Host: {} ({}) ", snap.hostname, snap.os_name),
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -118,10 +132,11 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled("| ", Style::default().fg(COL_MUTED)),
         Span::styled(
             format!(
-                "Scan: {}ms ({}) @ {}",
+                "Scan: {}ms ({}) @ {}{}",
                 snap.scan_duration_ms,
                 app.refresh_mode.label(),
-                snap.timestamp.format("%H:%M:%S")
+                snap.timestamp.format("%H:%M:%S"),
+                if app.is_scanning() { "  scanning..." } else { "" }
             ),
             Style::default().fg(COL_MUTED),
         ),
@@ -420,10 +435,16 @@ fn render_connections_tab(frame: &mut Frame, app: &mut App, area: Rect) {
                 Cell::from(truncate_str(&c.remote_display(), 28)),
                 Cell::from(c.state.clone()),
                 Cell::from(pid_str),
-                Cell::from(Span::styled(
-                    truncate_str(&c.process_name, 18),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                )),
+                Cell::from(Line::from(vec![
+                    Span::styled(
+                        if app.new_listeners.contains(&socket_key(c)) { "+ " } else { "" },
+                        Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        truncate_str(&c.process_name, 16),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ),
+                ])),
                 Cell::from(c.service_name.clone()),
                 Cell::from(c.exposure.short_label()),
             ])
@@ -431,7 +452,7 @@ fn render_connections_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let title = format!(
-        " Connections ({})  f:{}  s:{} ",
+        " Connections ({})  f:{}  s:{}  (+ = new listener since start) ",
         total_shown,
         app.conn_filter.label(),
         app.conn_sort.label()

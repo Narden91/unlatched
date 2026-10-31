@@ -84,18 +84,29 @@ No flags. Tabs are Overview, Connections, Findings, Audit, Processes.
 | `f` | Filter connections (All, Listening, Established, Public IP, Flagged) |
 | `s` | Sort (Risk, Port, Process, State, PID) |
 | `/` | Search the current table |
-| `r` | Scan now |
+| `r` | Scan now (runs in the background; the screen stays responsive) |
 | `a` | Auto-refresh `3s` / `10s` / Paused |
 | `e` | Write `safe_door_report.json` and `safe_door_report.md` |
 | `Enter`, `d` | Detail |
 | `?`, `h` | Help |
 | `q`, `Esc` | Close modal, clear search, or quit |
 
+A `+` before a process name in Connections marks a listener that was not present when the TUI started.
+
 ## CLI
 
 `--cli` prints a summary and exits. Add `--flagged` to hide clean sockets. `--json` dumps the snapshot.
 
-Exit `2` if anything `CRITICAL` showed up. Exit `0` only means no critical hits; high/medium/low can still be in the report.
+Exit `2` if anything `CRITICAL` showed up, in every mode including `--json`. Exit `0` only means no critical hits; high/medium/low can still be in the report. If a collector fails (for example the socket list), the report carries a warning and the grade reads `INCOMPLETE`.
+
+`--diff FILE` compares the scan with an earlier `--export-json` file and lists what changed: new listeners, new programs that own sockets, new autostart entries, and binaries with the same path but a new SHA-256. Programs match by exe path, not PID. A known program on a new random port (32768 and up) is not reported. Take the baseline and the later scan at the same privilege level.
+
+```powershell
+.\target\release\safe_door_scanner.exe --export-json baseline.json
+.\target\release\safe_door_scanner.exe --diff baseline.json
+```
+
+One-shot modes wait up to 2 s for reverse DNS answers. Names that do not arrive in time stay empty.
 
 ## Limits
 

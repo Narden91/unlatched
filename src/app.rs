@@ -1,10 +1,14 @@
+use crate::baseline::socket_key;
 use crate::models::{
     AuditItem, ConnectionEntry, IpCategory, ProcessRecord, ScanSnapshot, SecurityFinding, Severity,
 };
 use crate::report::{export_json_report, export_markdown_report};
 use crate::scanner::ScannerEngine;
 use ratatui::widgets::TableState;
+use std::collections::HashSet;
 use std::path::Path;
+use std::sync::mpsc::{self, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,7 +148,12 @@ impl RefreshMode {
 }
 
 pub struct App {
-    pub engine: ScannerEngine,
+    /// `None` while a scan runs on its own thread.
+    engine: Option<ScannerEngine>,
+    scan_rx: Option<mpsc::Receiver<(ScannerEngine, ScanSnapshot)>>,
+    /// Listener keys seen when the TUI started. A listener outside this set is new.
+    baseline_listeners: HashSet<String>,
+    pub new_listeners: HashSet<String>,
     pub snapshot: ScanSnapshot,
     pub active_tab: ActiveTab,
     pub conn_filter: ConnFilter,
@@ -171,7 +180,10 @@ impl App {
         let proc_table_state = init_table_state(initial_snapshot.processes.len());
 
         Self {
-            engine,
+            engine: Some(engine),
+            scan_rx: None,
+            baseline_listeners: listener_keys(&initial_snapshot),
+            new_listeners: HashSet::new(),
             snapshot: initial_snapshot,
             active_tab: ActiveTab::Overview,
             conn_filter: ConnFilter::All,
@@ -194,13 +206,55 @@ impl App {
         self.status_message = Some((msg.into(), Instant::now()));
     }
 
+    pub fn is_scanning(&self) -> bool {
+        self.engine.is_none()
+    }
+
+    /// Start a scan on its own thread so the UI keeps answering keys. No-op if one is running.
     pub fn trigger_scan(&mut self) {
-        self.snapshot = self.engine.perform_scan();
-        self.last_scan_instant = Instant::now();
-        self.clamp_selections();
+        let Some(mut engine) = self.engine.take() else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        self.scan_rx = Some(rx);
+        thread::spawn(move || {
+            let snapshot = engine.perform_scan();
+            let _ = tx.send((engine, snapshot));
+        });
+    }
+
+    fn poll_scan(&mut self) {
+        let Some(rx) = &self.scan_rx else { return };
+        match rx.try_recv() {
+            Ok((engine, snapshot)) => {
+                self.engine = Some(engine);
+                self.scan_rx = None;
+                self.new_listeners = listener_keys(&snapshot)
+                    .difference(&self.baseline_listeners)
+                    .cloned()
+                    .collect();
+                self.set_status(format!(
+                    "Scan completed in {} ms, {} new listener(s) since start",
+                    snapshot.scan_duration_ms,
+                    self.new_listeners.len()
+                ));
+                self.snapshot = snapshot;
+                self.last_scan_instant = Instant::now();
+                self.clamp_selections();
+            }
+            Err(TryRecvError::Empty) => {}
+            // The scan thread panicked and took the engine with it.
+            Err(TryRecvError::Disconnected) => {
+                self.engine = Some(ScannerEngine::new());
+                self.scan_rx = None;
+                self.last_scan_instant = Instant::now();
+                self.set_status("Scan thread failed; engine restarted");
+            }
+        }
     }
 
     pub fn on_tick(&mut self) {
+        self.poll_scan();
         if let Some((_, ts)) = &self.status_message {
             if ts.elapsed() > Duration::from_secs(5) {
                 self.status_message = None;
@@ -409,6 +463,15 @@ impl App {
         clamp_table(&mut self.audit_table_state, audit_len);
         clamp_table(&mut self.proc_table_state, proc_len);
     }
+}
+
+fn listener_keys(snapshot: &ScanSnapshot) -> HashSet<String> {
+    snapshot
+        .connections
+        .iter()
+        .filter(|c| c.is_listening())
+        .map(socket_key)
+        .collect()
 }
 
 fn init_table_state(len: usize) -> TableState {

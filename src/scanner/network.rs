@@ -9,6 +9,10 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
+
+// A lookup that fails to resolve blocks for about 1 s, so one worker would stall the queue.
+const DNS_WORKERS: usize = 8;
 
 #[derive(Clone)]
 pub struct DnsCache {
@@ -22,21 +26,42 @@ impl DnsCache {
         let resolved = Arc::new(Mutex::new(HashMap::new()));
         let queued = Arc::new(Mutex::new(HashSet::new()));
         let (tx, rx) = mpsc::channel::<IpAddr>();
+        let rx = Arc::new(Mutex::new(rx));
 
-        let resolved_worker = Arc::clone(&resolved);
-        thread::spawn(move || {
-            while let Ok(ip) = rx.recv() {
+        for _ in 0..DNS_WORKERS {
+            let rx = Arc::clone(&rx);
+            let resolved_worker = Arc::clone(&resolved);
+            thread::spawn(move || loop {
+                // The guard drops at the end of this statement, so lookups run in parallel.
+                let next = match rx.lock() {
+                    Ok(guard) => guard.recv(),
+                    Err(_) => return,
+                };
+                let Ok(ip) = next else { return };
                 let host = reverse_dns_lookup(ip);
                 if let Ok(mut guard) = resolved_worker.lock() {
                     guard.insert(ip, host);
                 }
-            }
-        });
+            });
+        }
 
         Self {
             resolved,
             queued,
             tx,
+        }
+    }
+
+    /// Block until every queued lookup finished or `timeout` passed.
+    pub fn wait_idle(&self, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            let queued = self.queued.lock().map(|q| q.len()).unwrap_or(0);
+            let done = self.resolved.lock().map(|r| r.len()).unwrap_or(0);
+            if done >= queued {
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
         }
     }
 
@@ -73,20 +98,7 @@ fn reverse_dns_lookup(ip: IpAddr) -> Option<String> {
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .ok()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let trimmed = line.trim();
-            if let Some(rest) = trimmed
-                .strip_prefix("Name:")
-                .or_else(|| trimmed.strip_prefix("Nome:"))
-            {
-                let host = rest.trim().trim_end_matches('.');
-                if !host.is_empty() {
-                    return Some(host.to_string());
-                }
-            }
-        }
-        None
+        parse_nslookup_name(&String::from_utf8_lossy(&output.stdout))
     }
     #[cfg(target_os = "linux")]
     {
@@ -105,6 +117,20 @@ fn reverse_dns_lookup(ip: IpAddr) -> Option<String> {
     {
         None
     }
+}
+
+/// Read the answer line of `nslookup <ip>` without matching a localized "Name:" label.
+/// The answer is the first line after the blank line that ends the Server/Address header.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_nslookup_name(stdout: &str) -> Option<String> {
+    let mut lines = stdout.lines().map(str::trim).skip_while(|l| l.is_empty());
+    lines.by_ref().find(|l| l.is_empty())?;
+    let answer = lines.find(|l| !l.is_empty())?;
+    if answer.starts_with('*') {
+        return None;
+    }
+    let host = answer.split_once(':')?.1.trim().trim_end_matches('.');
+    (!host.is_empty() && !host.contains(char::is_whitespace)).then(|| host.to_string())
 }
 
 pub fn classify_ip(ip: IpAddr) -> IpCategory {
@@ -183,10 +209,17 @@ pub fn is_windows_rpc_system_process(proc_name: &str) -> bool {
 pub fn collect_network_connections(
     processes: &mut HashMap<u32, ProcessRecord>,
     dns_cache: &DnsCache,
-) -> Vec<ConnectionEntry> {
+) -> (Vec<ConnectionEntry>, Option<String>) {
     let af_flags = AddressFamilyFlags::IPV4 | AddressFamilyFlags::IPV6;
     let proto_flags = ProtocolFlags::TCP | ProtocolFlags::UDP;
-    let sockets = get_sockets_info(af_flags, proto_flags).unwrap_or_default();
+    // An empty list on error would look like a clean host, so report the error to the caller.
+    let (sockets, warning) = match get_sockets_info(af_flags, proto_flags) {
+        Ok(s) => (s, None),
+        Err(e) => (
+            Vec::new(),
+            Some(format!("Socket enumeration failed: {e}. No sockets were checked.")),
+        ),
+    };
 
     let mut entries = Vec::with_capacity(sockets.len());
 
@@ -275,7 +308,7 @@ pub fn collect_network_connections(
         });
     }
 
-    entries
+    (entries, warning)
 }
 
 fn resolve_socket_owner(
@@ -322,5 +355,27 @@ fn resolve_socket_owner(
             None,
             Vec::new(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nslookup_answer_is_found_in_any_language() {
+        let en = "Server:  router.lan\r\nAddress:  192.168.1.1\r\n\r\nName:    dns.google\r\nAddress:  8.8.8.8\r\n\r\n";
+        let it = "Server:  router.lan\nAddress:  192.168.1.1\n\nNome:    dns.google\nAddress:  8.8.8.8\n";
+        let fr = "Serveur :  router.lan\nAddress:  192.168.1.1\n\nNom :    dns.google\nAddress:  8.8.8.8\n";
+        for out in [en, it, fr] {
+            assert_eq!(parse_nslookup_name(out).as_deref(), Some("dns.google"));
+        }
+    }
+
+    #[test]
+    fn nslookup_failure_gives_none() {
+        let missing = "Server:  router.lan\nAddress:  192.168.1.1\n\n*** router.lan can't find 203.0.113.7: Non-existent domain\n";
+        assert_eq!(parse_nslookup_name(missing), None);
+        assert_eq!(parse_nslookup_name(""), None);
     }
 }

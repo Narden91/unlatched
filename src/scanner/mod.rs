@@ -9,7 +9,7 @@ use chrono::Local;
 use network::{collect_network_connections, DnsCache};
 use process::{check_is_elevated, collect_processes, enrich_sha256_hashes, CachedHash};
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use sysinfo::{System, Users};
 
 pub struct ScannerEngine {
@@ -39,11 +39,23 @@ impl ScannerEngine {
         }
     }
 
+    /// One-shot modes exit before the DNS workers answer, so wait briefly and fill in the names.
+    pub fn refresh_hostnames(&self, snapshot: &mut ScanSnapshot, wait: Duration) {
+        self.dns_cache.wait_idle(wait);
+        for conn in &mut snapshot.connections {
+            if let (None, Some(ip)) = (&conn.remote_hostname, conn.remote_ip) {
+                conn.remote_hostname = self.dns_cache.lookup_or_queue(ip);
+            }
+        }
+    }
+
     pub fn perform_scan(&mut self) -> ScanSnapshot {
         let start = Instant::now();
 
         let mut proc_map = collect_processes(&mut self.sys, &self.users);
-        let mut connections = collect_network_connections(&mut proc_map, &self.dns_cache);
+        let (mut connections, net_warning) =
+            collect_network_connections(&mut proc_map, &self.dns_cache);
+        let scan_warnings: Vec<String> = net_warning.into_iter().collect();
         let mut findings =
             heuristics::evaluate_security_heuristics(&mut connections, &mut proc_map);
 
@@ -110,13 +122,18 @@ impl ScannerEngine {
 
         let total_penalty: u32 = findings.iter().map(|f| f.severity.penalty_points()).sum();
         let security_score = 100u32.saturating_sub(total_penalty) as u8;
-        let security_grade = match security_score {
-            95..=100 => "A+ (HARDENED)",
-            85..=94 => "A (SECURE)",
-            75..=84 => "B (GOOD)",
-            60..=74 => "C (REVIEW)",
-            40..=59 => "D (AT RISK)",
-            _ => "F (CRITICAL)",
+        // The score only counts findings. It does not measure how secure the host is.
+        let security_grade = if scan_warnings.is_empty() {
+            match security_score {
+                95..=100 => "A+",
+                85..=94 => "A",
+                75..=84 => "B",
+                60..=74 => "C",
+                40..=59 => "D",
+                _ => "F",
+            }
+        } else {
+            "INCOMPLETE"
         }
         .to_string();
 
@@ -130,6 +147,7 @@ impl ScannerEngine {
             is_elevated: self.is_elevated,
             security_score,
             security_grade,
+            scan_warnings,
             total_connections,
             listening_ports,
             established_connections,

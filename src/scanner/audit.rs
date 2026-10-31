@@ -60,9 +60,12 @@ fn evaluate_persistence_command(cmd: &str) -> (AuditStatus, String) {
     let lower = cmd.to_lowercase();
     let norm_path = lower.replace('/', "\\");
 
+    // A chained command (`del x & powershell -enc ...`) must reach the critical patterns below.
+    let is_chained = lower.contains(['&', '|', ';', '>', '<']);
     if (lower.contains("cmd.exe") || lower.starts_with("cmd "))
         && lower.contains(" /c ")
         && lower.contains(" del ")
+        && !is_chained
     {
         return (
             AuditStatus::Info,
@@ -160,7 +163,16 @@ fn audit_windows_firewall(items: &mut Vec<AuditItem>, findings: &mut Vec<Securit
             subkey_name
         );
         if let Ok(key) = hklm.open_subkey(&path) {
-            let enabled: u32 = key.get_value("EnableFirewall").unwrap_or(1);
+            let local: u32 = key.get_value("EnableFirewall").unwrap_or(1);
+            // Group Policy overrides the local setting, so it decides the effective state.
+            let policy: Option<u32> = hklm
+                .open_subkey(format!(
+                    "SOFTWARE\\Policies\\Microsoft\\WindowsFirewall\\{}",
+                    subkey_name
+                ))
+                .ok()
+                .and_then(|k| k.get_value("EnableFirewall").ok());
+            let enabled = policy.unwrap_or(local);
             if enabled == 1 {
                 items.push(AuditItem {
                     check_id: format!("AUD-FW-{}", subkey_name.to_uppercase()),
@@ -382,7 +394,7 @@ fn audit_windows_startup_folders(
 }
 
 #[cfg(target_os = "linux")]
-fn audit_linux_firewall(items: &mut Vec<AuditItem>, _findings: &mut Vec<SecurityFinding>) {
+fn audit_linux_firewall(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityFinding>) {
     let ufw_conf = fs::read_to_string("/etc/ufw/ufw.conf").unwrap_or_default();
     let nft_loaded = Path::new("/sys/module/nf_tables").exists();
     let ipt_loaded = Path::new("/proc/net/ip_tables_names").exists();
@@ -406,6 +418,23 @@ fn audit_linux_firewall(items: &mut Vec<AuditItem>, _findings: &mut Vec<Security
             "Neither UFW nor nftables/iptables kernel modules appear active.".to_string(),
         )
     };
+
+    if status == AuditStatus::Warning {
+        findings.push(SecurityFinding {
+            rule_id: "AUD-LIN-FW".to_string(),
+            category: "Host Defense Disabled".to_string(),
+            mitre_id: "T1562.004".to_string(),
+            severity: status.to_severity(),
+            title: "No Active Linux Firewall Detected".to_string(),
+            description: details.clone(),
+            pid: None,
+            process_name: None,
+            endpoint: None,
+            evidence: "/etc/ufw/ufw.conf, /sys/module/nf_tables, /proc/net/ip_tables_names"
+                .to_string(),
+            remediation: "Enable ufw or load an nftables ruleset.".to_string(),
+        });
+    }
 
     items.push(AuditItem {
         check_id: "AUD-LIN-FW".to_string(),
@@ -524,41 +553,9 @@ fn audit_linux_sshd_config(items: &mut Vec<AuditItem>, findings: &mut Vec<Securi
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let lower = trimmed.to_lowercase();
-            if lower.starts_with("permitrootlogin") && lower.contains("yes") {
-                items.push(AuditItem {
-                    check_id: "AUD-SSH-ROOT".to_string(),
-                    subsystem: "SSH Hardening".to_string(),
-                    name: "PermitRootLogin".to_string(),
-                    location: sshd_path.to_string(),
-                    value: trimmed.to_string(),
-                    status: AuditStatus::Warning,
-                    details: "Direct SSH root login is enabled.".to_string(),
-                });
-                findings.push(SecurityFinding {
-                    rule_id: "AUD-SSH-ROOT".to_string(),
-                    category: "SSH Configuration".to_string(),
-                    mitre_id: "T1078.003".to_string(),
-                    severity: Severity::Medium,
-                    title: "SSH PermitRootLogin Enabled".to_string(),
-                    description: "/etc/ssh/sshd_config permits direct root login over SSH.".to_string(),
-                    pid: None,
-                    process_name: Some("sshd".to_string()),
-                    endpoint: None,
-                    evidence: trimmed.to_string(),
-                    remediation: "Set 'PermitRootLogin prohibit-password' or 'no' in /etc/ssh/sshd_config.".to_string(),
-                });
-            }
-            if lower.starts_with("permitemptypasswords") && lower.contains("yes") {
-                items.push(AuditItem {
-                    check_id: "AUD-SSH-EMPTY".to_string(),
-                    subsystem: "SSH Hardening".to_string(),
-                    name: "PermitEmptyPasswords".to_string(),
-                    location: sshd_path.to_string(),
-                    value: trimmed.to_string(),
-                    status: AuditStatus::Critical,
-                    details: "SSH allows login for accounts with empty passwords.".to_string(),
-                });
+            if let Some((item, finding)) = check_sshd_directive(sshd_path, trimmed) {
+                items.push(item);
+                findings.extend(finding);
             }
         }
     }
@@ -606,6 +603,87 @@ fn audit_linux_systemd_units(items: &mut Vec<AuditItem>, findings: &mut Vec<Secu
                 }
             }
         }
+    }
+}
+
+/// Not Linux-only, so the tests run on every host.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn check_sshd_directive(
+    path: &str,
+    trimmed: &str,
+) -> Option<(AuditItem, Option<SecurityFinding>)> {
+    let lower = trimmed.to_lowercase();
+    if lower.starts_with("permitrootlogin") && lower.contains("yes") {
+        let item = AuditItem {
+            check_id: "AUD-SSH-ROOT".to_string(),
+            subsystem: "SSH Hardening".to_string(),
+            name: "PermitRootLogin".to_string(),
+            location: path.to_string(),
+            value: trimmed.to_string(),
+            status: AuditStatus::Warning,
+            details: "Direct SSH root login is enabled.".to_string(),
+        };
+        let finding = SecurityFinding {
+            rule_id: "AUD-SSH-ROOT".to_string(),
+            category: "SSH Configuration".to_string(),
+            mitre_id: "T1078.003".to_string(),
+            severity: Severity::Medium,
+            title: "SSH PermitRootLogin Enabled".to_string(),
+            description: format!("{} permits direct root login over SSH.", path),
+            pid: None,
+            process_name: Some("sshd".to_string()),
+            endpoint: None,
+            evidence: trimmed.to_string(),
+            remediation: format!(
+                "Set 'PermitRootLogin prohibit-password' or 'no' in {}.",
+                path
+            ),
+        };
+        return Some((item, Some(finding)));
+    }
+    if lower.starts_with("permitemptypasswords") && lower.contains("yes") {
+        let item = AuditItem {
+            check_id: "AUD-SSH-EMPTY".to_string(),
+            subsystem: "SSH Hardening".to_string(),
+            name: "PermitEmptyPasswords".to_string(),
+            location: path.to_string(),
+            value: trimmed.to_string(),
+            status: AuditStatus::Critical,
+            details: "SSH allows login for accounts with empty passwords.".to_string(),
+        };
+        // The audit row alone did not change the score or the exit code, so add a finding.
+        let finding = SecurityFinding {
+            rule_id: "AUD-SSH-EMPTY".to_string(),
+            category: "SSH Configuration".to_string(),
+            mitre_id: "T1078".to_string(),
+            severity: Severity::Critical,
+            title: "SSH PermitEmptyPasswords Enabled".to_string(),
+            description: format!("{} allows SSH login with an empty password.", path),
+            pid: None,
+            process_name: Some("sshd".to_string()),
+            endpoint: None,
+            evidence: trimmed.to_string(),
+            remediation: format!("Set 'PermitEmptyPasswords no' in {}.", path),
+        };
+        return Some((item, Some(finding)));
+    }
+    None
+}
+
+/// 0.0.0.0 and loopback targets are what blocklists use. Any other address is a redirect.
+fn hosts_override_level(ip: &str) -> (AuditStatus, Severity, &'static str) {
+    if matches!(ip, "0.0.0.0" | "127.0.0.1" | "::1") {
+        (
+            AuditStatus::Warning,
+            Severity::Medium,
+            "Hosts file blocks a security or OS update domain (blocklist or tampering).",
+        )
+    } else {
+        (
+            AuditStatus::Critical,
+            Severity::Critical,
+            "Hosts file redirects a security or OS update domain to another address.",
+        )
     }
 }
 
@@ -668,20 +746,21 @@ fn audit_hosts_file(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityFindi
         let domain_lower = domain_list.to_lowercase();
 
         if sensitive_domains.iter().any(|&sd| domain_lower.contains(sd)) {
+            let (status, severity, details) = hosts_override_level(ip);
             items.push(AuditItem {
                 check_id: "AUD-HOSTS-HIJACK".to_string(),
                 subsystem: "DNS / Hosts File".to_string(),
                 name: format!("Hijacked Domain ({})", domain_list),
                 location: hosts_path.to_string(),
                 value: format!("{} -> {}", domain_list, ip),
-                status: AuditStatus::Critical,
-                details: "Hosts file overrides a security or OS update domain.".to_string(),
+                status,
+                details: details.to_string(),
             });
             findings.push(SecurityFinding {
                 rule_id: "AUD-HOSTS-TAMPER".to_string(),
                 category: "Hosts File Tampering".to_string(),
                 mitre_id: "T1565.001".to_string(),
-                severity: Severity::Critical,
+                severity,
                 title: format!("Hosts File Redirects Security/Update Domain: {}", domain_list),
                 description: format!(
                     "{} maps '{}' to '{}'.",
@@ -738,5 +817,28 @@ mod tests {
             r#""C:\Program Files\Microsoft OneDrive\OneDrive.exe" /background"#,
         );
         assert_eq!(st5, AuditStatus::Pass);
+
+        // Chaining after `del` must not hide the second command behind the Info rule.
+        let (st6, _) = evaluate_persistence_command(
+            r#"cmd.exe /c del x.tmp & powershell -w hidden -enc ZQBjAGgAbwA="#,
+        );
+        assert_eq!(st6, AuditStatus::Critical);
+    }
+
+    #[test]
+    fn test_sshd_empty_passwords_creates_finding() {
+        let (item, finding) =
+            check_sshd_directive("/etc/ssh/sshd_config", "PermitEmptyPasswords yes").unwrap();
+        assert_eq!(item.status, AuditStatus::Critical);
+        assert_eq!(finding.unwrap().severity, Severity::Critical);
+        assert!(check_sshd_directive("/etc/ssh/sshd_config", "PermitEmptyPasswords no").is_none());
+        assert!(check_sshd_directive("/etc/ssh/sshd_config", "PermitRootLogin yes").is_some());
+    }
+
+    #[test]
+    fn test_hosts_blocklist_is_not_critical() {
+        assert_eq!(hosts_override_level("0.0.0.0").0, AuditStatus::Warning);
+        assert_eq!(hosts_override_level("127.0.0.1").1, Severity::Medium);
+        assert_eq!(hosts_override_level("203.0.113.5").0, AuditStatus::Critical);
     }
 }
