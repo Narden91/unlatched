@@ -5,18 +5,18 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, Tabs, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap},
     Frame,
 };
 
-const COL_CRIT: Color = Color::Rgb(255, 75, 75);
-const COL_HIGH: Color = Color::Rgb(255, 145, 50);
-const COL_MED: Color = Color::Rgb(250, 204, 21);
-const COL_LOW: Color = Color::Rgb(56, 189, 248);
-const COL_SAFE: Color = Color::Rgb(52, 211, 153);
-const COL_ACCENT: Color = Color::Rgb(34, 211, 238);
-const COL_MUTED: Color = Color::Rgb(148, 163, 184);
-const COL_HIGHLIGHT_BG: Color = Color::Rgb(30, 41, 59);
+const COL_CRIT: Color = Color::Rgb(248, 81, 73);
+const COL_HIGH: Color = Color::Rgb(245, 158, 11);
+const COL_MED: Color = Color::Rgb(210, 153, 34);
+const COL_LOW: Color = Color::Rgb(88, 166, 255);
+const COL_SAFE: Color = Color::Rgb(16, 185, 129);
+const COL_ACCENT: Color = Color::Rgb(16, 185, 129);
+const COL_MUTED: Color = Color::Rgb(139, 148, 158);
+const COL_HIGHLIGHT_BG: Color = Color::Rgb(26, 29, 32);
 
 fn severity_color(sev: Severity) -> Color {
     match sev {
@@ -159,7 +159,7 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
             ),
         ]),
         Line::from(vec![
-            Span::raw(" [4] OS Audit "),
+            Span::raw(" [4] Audit "),
             Span::styled(
                 format!("({}) ", snap.audit_items.len()),
                 Style::default().fg(COL_MED),
@@ -207,152 +207,71 @@ fn render_overview_tab(frame: &mut Frame, app: &App, area: Rect) {
     let snap = &app.snapshot;
     let v_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(10)])
+        .constraints([Constraint::Length(3), Constraint::Min(10)])
         .split(area);
 
-    let top_cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-            Constraint::Percentage(33),
-        ])
-        .split(v_chunks[0]);
-
-    let gauge_color = match snap.security_score {
-        85..=100 => COL_SAFE,
-        65..=84 => COL_MED,
-        _ => COL_CRIT,
+    let flagged_col = if snap.suspicious_connections > 0 {
+        COL_HIGH
+    } else {
+        COL_SAFE
     };
-    let gauge = Gauge::default()
-        .block(
-            Block::default()
-                .title(" Security Score ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(gauge_color)),
-        )
-        .gauge_style(
-            Style::default()
-                .fg(gauge_color)
-                .bg(Color::Rgb(15, 23, 42))
-                .add_modifier(Modifier::BOLD),
-        )
-        .percent(snap.security_score as u16)
-        .label(format!(
-            "{}/100 - {}",
-            snap.security_score, snap.security_grade
-        ));
-    frame.render_widget(gauge, top_cols[0]);
-
-    let net_lines = vec![
-        Line::from(vec![
-            Span::styled(" Active Sockets : ", Style::default().fg(COL_MUTED)),
-            Span::styled(
-                format!("{:<6}", snap.total_connections),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Listening : ", Style::default().fg(COL_MUTED)),
-            Span::styled(
-                format!("{}", snap.listening_ports),
-                Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" Established    : ", Style::default().fg(COL_MUTED)),
-            Span::styled(
-                format!("{:<6}", snap.established_connections),
-                Style::default().fg(COL_SAFE).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Public IP : ", Style::default().fg(COL_MUTED)),
-            Span::styled(
-                format!("{}", snap.external_connections),
-                Style::default().fg(COL_MED).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" Flagged Conns  : ", Style::default().fg(COL_MUTED)),
-            Span::styled(
-                format!("{}", snap.suspicious_connections),
-                Style::default()
-                    .fg(if snap.suspicious_connections > 0 {
-                        COL_HIGH
-                    } else {
-                        COL_SAFE
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-    ];
-    let net_card = Paragraph::new(net_lines).block(
-        Block::default()
-            .title(" Network Summary ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(COL_ACCENT)),
-    );
-    frame.render_widget(net_card, top_cols[1]);
-
-    let sev_lines = vec![
-        Line::from(vec![
-            Span::styled(
-                " CRITICAL : ",
-                Style::default().fg(COL_CRIT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{:<5}", snap.critical_count),
-                Style::default().fg(COL_CRIT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " HIGH   : ",
-                Style::default().fg(COL_HIGH).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{}", snap.high_count),
-                Style::default().fg(COL_HIGH).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                " MEDIUM   : ",
-                Style::default().fg(COL_MED).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{:<5}", snap.medium_count),
-                Style::default().fg(COL_MED).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " LOW    : ",
-                Style::default().fg(COL_LOW).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{}", snap.low_count),
-                Style::default().fg(COL_LOW).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" OS Audit : ", Style::default().fg(COL_MUTED)),
-            Span::styled(
-                format!("{} persistence/firewall checks", snap.audit_items.len()),
-                Style::default().fg(Color::White),
-            ),
-        ]),
-    ];
-    let sev_card = Paragraph::new(sev_lines).block(
-        Block::default()
-            .title(" Findings Breakdown ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if snap.critical_count > 0 {
-                COL_CRIT
-            } else if snap.high_count > 0 {
+    let crit_col = if snap.critical_count > 0 {
+        COL_CRIT
+    } else {
+        COL_MUTED
+    };
+    let status = Line::from(vec![
+        Span::styled(" listen ", Style::default().fg(COL_MUTED)),
+        Span::styled(
+            snap.listening_ports.to_string(),
+            Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  est ", Style::default().fg(COL_MUTED)),
+        Span::styled(
+            snap.established_connections.to_string(),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  public ", Style::default().fg(COL_MUTED)),
+        Span::styled(
+            snap.external_connections.to_string(),
+            Style::default().fg(COL_MED).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  flagged ", Style::default().fg(COL_MUTED)),
+        Span::styled(
+            snap.suspicious_connections.to_string(),
+            Style::default().fg(flagged_col).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  crit ", Style::default().fg(COL_MUTED)),
+        Span::styled(
+            snap.critical_count.to_string(),
+            Style::default().fg(crit_col).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  high ", Style::default().fg(COL_MUTED)),
+        Span::styled(
+            snap.high_count.to_string(),
+            Style::default().fg(if snap.high_count > 0 {
                 COL_HIGH
             } else {
-                COL_SAFE
-            })),
+                COL_MUTED
+            }),
+        ),
+        Span::styled("  med ", Style::default().fg(COL_MUTED)),
+        Span::styled(snap.medium_count.to_string(), Style::default().fg(COL_MUTED)),
+        Span::styled("  low ", Style::default().fg(COL_MUTED)),
+        Span::styled(snap.low_count.to_string(), Style::default().fg(COL_MUTED)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(status).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray)),
+        ),
+        v_chunks[0],
     );
-    frame.render_widget(sev_card, top_cols[2]);
 
     let bottom_cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(v_chunks[1]);
 
     let finding_rows: Vec<Row> = if snap.findings.is_empty() {
@@ -363,7 +282,7 @@ fn render_overview_tab(frame: &mut Frame, app: &App, area: Rect) {
             )),
             Cell::from("-"),
             Cell::from(Span::styled(
-                "No active backdoors or security findings detected.",
+                "Nothing flagged.",
                 Style::default().fg(COL_SAFE),
             )),
         ])]
@@ -405,7 +324,7 @@ fn render_overview_tab(frame: &mut Frame, app: &App, area: Rect) {
     )
     .block(
         Block::default()
-            .title(" Security Findings (Tab [3]) ")
+            .title(" Findings ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     );
@@ -462,7 +381,7 @@ fn render_overview_tab(frame: &mut Frame, app: &App, area: Rect) {
     )
     .block(
         Block::default()
-            .title(" Listening Ports (Tab [2]) ")
+            .title(" Listening ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     );
@@ -512,7 +431,7 @@ fn render_connections_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let title = format!(
-        " Connections & Ports ({}) [Filter (f): {} | Sort (s): {}] ",
+        " Connections ({})  f:{}  s:{} ",
         total_shown,
         app.conn_filter.label(),
         app.conn_sort.label()
@@ -627,7 +546,7 @@ fn render_connections_tab(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let inspector = Paragraph::new(inspector_lines).block(
         Block::default()
-            .title(" Selected Socket Details (Enter for full view) ")
+            .title(" Socket ")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray)),
     );
@@ -702,7 +621,7 @@ fn render_findings_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     )
     .block(
         Block::default()
-            .title(format!(" Security Findings ({}) ", filtered.len()))
+            .title(format!(" Findings ({}) ", filtered.len()))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COL_ACCENT)),
     )
@@ -812,10 +731,7 @@ fn render_audit_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     )
     .block(
         Block::default()
-            .title(format!(
-                " Persistence & Host Audit ({} checks) ",
-                filtered.len()
-            ))
+            .title(format!(" Audit ({}) ", filtered.len()))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(COL_ACCENT)),
     )
@@ -1226,7 +1142,7 @@ fn render_help_modal(frame: &mut Frame) {
 
     let lines = vec![
         Line::from(Span::styled(
-            "KEYBOARD CONTROLS",
+            "Keys",
             Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
@@ -1243,7 +1159,7 @@ fn render_help_modal(frame: &mut Frame) {
         Line::from("  [q] or [Esc]        Close modal / Clear search / Quit"),
         Line::from(""),
         Line::from(Span::styled(
-            "DETECTION RULES",
+            "Rules",
             Style::default().fg(COL_MED).add_modifier(Modifier::BOLD),
         )),
         Line::from("  - H01: Shells (sh, bash, cmd, powershell) or relays (nc, socat) bound to sockets"),

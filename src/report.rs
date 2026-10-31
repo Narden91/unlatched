@@ -134,7 +134,7 @@ pub fn export_markdown_report(snapshot: &ScanSnapshot, path: &Path) -> Result<()
 pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
     let reset = "\x1b[0m";
     let bold = "\x1b[1m";
-    let cyan = "\x1b[36m";
+    let cyan = "\x1b[32m";
     let green = "\x1b[32m";
     let yellow = "\x1b[33m";
     let red = "\x1b[31m";
@@ -148,14 +148,8 @@ pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
     };
 
     println!(
-        "\n{bold}{cyan}========================================================================================{reset}"
-    );
-    println!(
-        "{bold}{cyan}  SAFE DOOR SCANNER v0.1.0{reset}  |  Host: {bold}{}{reset} ({} {})  |  Scan Time: {bold}{} ms{reset}",
+        "\n{bold}{cyan}Unlatched{reset}  {} ({} {})  {}ms",
         snapshot.hostname, snapshot.os_name, snapshot.os_version, snapshot.scan_duration_ms
-    );
-    println!(
-        "{bold}{cyan}========================================================================================{reset}"
     );
     println!(
         "  Security Score : {bold}{score_color}{}/100 [{}]{reset}   |   Privilege: {bold}{}{reset}",
@@ -179,10 +173,10 @@ pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
         snapshot.critical_count, snapshot.high_count, snapshot.medium_count, snapshot.low_count
     );
 
-    println!("{bold}{cyan}FINDINGS ({}){reset}", snapshot.findings.len());
+    println!("{bold}{cyan}Findings ({}){reset}", snapshot.findings.len());
     println!("{dim}----------------------------------------------------------------------------------------{reset}");
     if snapshot.findings.is_empty() {
-        println!("  {green}[OK] No security findings detected.{reset}\n");
+        println!("  {green}Nothing flagged.{reset}\n");
     } else {
         for f in &snapshot.findings {
             let sev_col = match f.severity {
@@ -212,7 +206,7 @@ pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
         .collect();
 
     println!(
-        "{bold}{cyan}CONNECTIONS & PORTS (Showing {} of {}){reset}",
+        "{bold}{cyan}Connections ({} of {}){reset}",
         filtered_conns.len().min(45),
         filtered_conns.len()
     );
