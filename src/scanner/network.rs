@@ -1,6 +1,9 @@
 use crate::models::{
     ConnectionEntry, ExposureScope, IpCategory, ProcessRecord, Protocol, Severity,
 };
+use crate::scanner::indicators::{
+    check_suspicious_exec_path, is_relay_name, is_shell_name, SENSITIVE_ORIGINAL_BINARIES,
+};
 use crate::scanner::ports_db::lookup_service_name;
 use netstat2::{
     get_sockets_info, AddressFamilyFlags, ProtocolFlags, ProtocolSocketInfo, TcpState,
@@ -13,24 +16,34 @@ use std::time::{Duration, Instant};
 
 // A lookup that fails to resolve blocks for about 1 s, so one worker would stall the queue.
 const DNS_WORKERS: usize = 8;
+const DNS_QUEUE_CAPACITY: usize = 256;
+const DNS_CACHE_MAX_ENTRIES: usize = 2048;
+const NEGATIVE_DNS_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Clone)]
+struct DnsEntry {
+    host: Option<String>,
+    retry_after: Option<Instant>,
+}
 
 #[derive(Clone)]
 pub struct DnsCache {
-    resolved: Arc<Mutex<HashMap<IpAddr, Option<String>>>>,
-    queued: Arc<Mutex<HashSet<IpAddr>>>,
-    tx: mpsc::Sender<IpAddr>,
+    resolved: Arc<Mutex<HashMap<IpAddr, DnsEntry>>>,
+    in_flight: Arc<Mutex<HashSet<IpAddr>>>,
+    tx: mpsc::SyncSender<IpAddr>,
 }
 
 impl DnsCache {
     pub fn new() -> Self {
         let resolved = Arc::new(Mutex::new(HashMap::new()));
-        let queued = Arc::new(Mutex::new(HashSet::new()));
-        let (tx, rx) = mpsc::channel::<IpAddr>();
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
+        let (tx, rx) = mpsc::sync_channel::<IpAddr>(DNS_QUEUE_CAPACITY);
         let rx = Arc::new(Mutex::new(rx));
 
         for _ in 0..DNS_WORKERS {
             let rx = Arc::clone(&rx);
             let resolved_worker = Arc::clone(&resolved);
+            let flight_worker = Arc::clone(&in_flight);
             thread::spawn(move || loop {
                 // The guard drops at the end of this statement, so lookups run in parallel.
                 let next = match rx.lock() {
@@ -38,29 +51,42 @@ impl DnsCache {
                     Err(_) => return,
                 };
                 let Ok(ip) = next else { return };
-                // Whoever controls the remote IP writes its PTR record, so clean it on entry.
+                // Whoever controls the remote IP writes its PTR record, so validate & neutralize on entry.
                 let host = reverse_dns_lookup(ip)
+                    .filter(|h| is_valid_ptr_hostname(h))
                     .map(|h| crate::models::neutralized(&h).unwrap_or(h));
+
+                let retry_after = if host.is_none() {
+                    Some(Instant::now() + NEGATIVE_DNS_TTL)
+                } else {
+                    None
+                };
+
                 if let Ok(mut guard) = resolved_worker.lock() {
-                    guard.insert(ip, host);
+                    if guard.len() >= DNS_CACHE_MAX_ENTRIES {
+                        guard.clear();
+                    }
+                    guard.insert(ip, DnsEntry { host, retry_after });
+                }
+                if let Ok(mut f) = flight_worker.lock() {
+                    f.remove(&ip);
                 }
             });
         }
 
         Self {
             resolved,
-            queued,
+            in_flight,
             tx,
         }
     }
 
-    /// Block until every queued lookup finished or `timeout` passed.
+    /// Block until every in-flight lookup finished or `timeout` passed.
     pub fn wait_idle(&self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            let queued = self.queued.lock().map(|q| q.len()).unwrap_or(0);
-            let done = self.resolved.lock().map(|r| r.len()).unwrap_or(0);
-            if done >= queued {
+            let empty = self.in_flight.lock().map(|q| q.is_empty()).unwrap_or(true);
+            if empty {
                 return;
             }
             thread::sleep(Duration::from_millis(25));
@@ -73,19 +99,31 @@ impl DnsCache {
         }
 
         if let Ok(guard) = self.resolved.lock() {
-            if let Some(res) = guard.get(&ip) {
-                return res.clone();
+            if let Some(entry) = guard.get(&ip) {
+                match (&entry.host, entry.retry_after) {
+                    (Some(h), _) => return Some(h.clone()),
+                    (None, Some(until)) if Instant::now() < until => return None,
+                    _ => {}
+                }
             }
         }
 
-        if let Ok(mut q) = self.queued.lock() {
-            if q.insert(ip) {
-                let _ = self.tx.send(ip);
+        if let Ok(mut f) = self.in_flight.lock() {
+            if f.len() < DNS_QUEUE_CAPACITY && f.insert(ip) && self.tx.try_send(ip).is_err() {
+                f.remove(&ip);
             }
         }
 
         None
     }
+}
+
+#[must_use]
+fn is_valid_ptr_hostname(host: &str) -> bool {
+    (1..=253).contains(&host.len())
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(unused_variables))]
@@ -95,7 +133,10 @@ fn reverse_dns_lookup(ip: IpAddr) -> Option<String> {
         use std::os::windows::process::CommandExt;
         use std::process::Command;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let sys_root = crate::scanner::system_root();
         let output = Command::new(nslookup_exe())
+            .env_clear()
+            .env("SystemRoot", &sys_root)
             .arg(ip.to_string())
             .creation_flags(CREATE_NO_WINDOW)
             .output()
@@ -105,11 +146,12 @@ fn reverse_dns_lookup(ip: IpAddr) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
         use std::process::Command;
-        // Absolute path: a PATH entry the user controls must not decide what root runs.
+        // Absolute path + cleared env: user-controlled PATH or LD_PRELOAD must not run as root.
         let getent = ["/usr/bin/getent", "/bin/getent"]
             .into_iter()
             .find(|p| std::path::Path::new(p).exists())?;
         let output = Command::new(getent)
+            .env_clear()
             .args(["hosts", &ip.to_string()])
             .output()
             .ok()?;
@@ -145,7 +187,7 @@ fn parse_nslookup_name(stdout: &str) -> Option<String> {
         return None;
     }
     let host = answer.split_once(':')?.1.trim().trim_end_matches('.');
-    (!host.is_empty() && !host.contains(char::is_whitespace)).then(|| host.to_string())
+    is_valid_ptr_hostname(host).then(|| host.to_string())
 }
 
 pub fn classify_ip(ip: IpAddr) -> IpCategory {
@@ -215,10 +257,12 @@ fn format_tcp_state(state: TcpState) -> &'static str {
 }
 
 pub fn is_windows_rpc_system_process(proc_name: &str) -> bool {
-    matches!(
-        proc_name.to_lowercase().as_str(),
-        "svchost.exe" | "lsass.exe" | "wininit.exe" | "services.exe" | "spoolsv.exe" | "system"
-    )
+    proc_name.eq_ignore_ascii_case("svchost.exe")
+        || proc_name.eq_ignore_ascii_case("lsass.exe")
+        || proc_name.eq_ignore_ascii_case("wininit.exe")
+        || proc_name.eq_ignore_ascii_case("services.exe")
+        || proc_name.eq_ignore_ascii_case("spoolsv.exe")
+        || proc_name.eq_ignore_ascii_case("system")
 }
 
 pub fn collect_network_connections(
@@ -232,14 +276,16 @@ pub fn collect_network_connections(
         Ok(s) => (s, None),
         Err(e) => (
             Vec::new(),
-            Some(format!("Socket enumeration failed: {e}. No sockets were checked.")),
+            Some(format!(
+                "Socket enumeration failed: {e}. No sockets were checked."
+            )),
         ),
     };
 
     let mut entries = Vec::with_capacity(sockets.len());
 
     for (idx, sock) in sockets.into_iter().enumerate() {
-        let pid = sock.associated_pids.first().copied();
+        let pid = attribute_socket_pids(&sock.associated_pids, processes);
 
         let (protocol, local_ip, local_port, remote_ip, remote_port, state) =
             match sock.protocol_socket_info {
@@ -326,12 +372,69 @@ pub fn collect_network_connections(
     (entries, warning)
 }
 
+/// Increments `open_sockets_count` on every PID sharing the socket descriptor and selects the
+/// highest-risk owner PID (preventing FD-inheritance via `dup2` from hiding a child shell behind
+/// its parent daemon's lower PID).
+fn attribute_socket_pids(
+    associated_pids: &[u32],
+    processes: &mut HashMap<u32, ProcessRecord>,
+) -> Option<u32> {
+    if associated_pids.is_empty() {
+        return None;
+    }
+
+    let mut seen_buf = [0u32; 8];
+    let mut seen_len = 0usize;
+    for &id in associated_pids {
+        if seen_len < seen_buf.len() {
+            if seen_buf[..seen_len].contains(&id) {
+                continue;
+            }
+            seen_buf[seen_len] = id;
+            seen_len += 1;
+        }
+        if let Some(p) = processes.get_mut(&id) {
+            p.open_sockets_count += 1;
+        }
+    }
+
+    if associated_pids.len() == 1 {
+        return Some(associated_pids[0]);
+    }
+
+    associated_pids
+        .iter()
+        .copied()
+        .max_by_key(|&id| (pid_risk_weight(processes.get(&id)), id))
+}
+
+fn pid_risk_weight(proc_opt: Option<&ProcessRecord>) -> u8 {
+    let Some(p) = proc_opt else { return 0 };
+    let name_lower = p.name.to_ascii_lowercase();
+    let orig_lower = p
+        .original_filename
+        .as_deref()
+        .map(str::to_ascii_lowercase);
+    if is_shell_name(&name_lower)
+        || is_relay_name(&name_lower)
+        || orig_lower
+            .as_deref()
+            .is_some_and(|o| SENSITIVE_ORIGINAL_BINARIES.contains(&o))
+    {
+        return 4;
+    }
+    let exe_norm = p.exe_path.to_ascii_lowercase().replace('/', "\\");
+    if p.is_deleted_binary || check_suspicious_exec_path(&p.exe_path, &exe_norm).is_some() {
+        return 3;
+    }
+    1
+}
+
 fn resolve_socket_owner(
     pid: Option<u32>,
-    processes: &mut HashMap<u32, ProcessRecord>,
+    processes: &HashMap<u32, ProcessRecord>,
 ) -> (String, String, String, Option<String>, Vec<String>) {
-    if let Some(p) = pid.and_then(|id| processes.get_mut(&id)) {
-        p.open_sockets_count += 1;
+    if let Some(p) = pid.and_then(|id| processes.get(&id)) {
         return (
             p.name.clone(),
             p.exe_path.clone(),
@@ -397,14 +500,48 @@ mod tests {
     }
 
     #[test]
-    fn nslookup_failure_gives_none() {
+    fn nslookup_failure_and_malicious_ptr_give_none() {
         let missing = "Server:  router.lan\nAddress:  192.168.1.1\n\n*** router.lan can't find 203.0.113.7: Non-existent domain\n";
         assert_eq!(parse_nslookup_name(missing), None);
         assert_eq!(parse_nslookup_name(""), None);
-        // Each guard needs an input the other one lets through.
         let starred = "Server:  r\nAddress:  1.1.1.1\n\n*** timeout:expired\n";
         assert_eq!(parse_nslookup_name(starred), None);
         let spaced = "Server:  r\nAddress:  1.1.1.1\n\nDNS request timed out: timeout was 2 seconds.\n";
         assert_eq!(parse_nslookup_name(spaced), None);
+        let injected = "Server:  r\nAddress:  1.1.1.1\n\nName:    evil`pwn`|cell\n";
+        assert_eq!(parse_nslookup_name(injected), None);
+    }
+
+    #[test]
+    fn multi_pid_socket_prefers_inherited_shell_and_counts_all_owners() {
+        let mut procs = HashMap::new();
+        for (pid, name, exe) in [(400u32, "nginx", "/usr/sbin/nginx"), (9001u32, "bash", "/bin/bash")] {
+            procs.insert(
+                pid,
+                ProcessRecord {
+                    pid,
+                    ppid: None,
+                    name: name.to_string(),
+                    exe_path: exe.to_string(),
+                    cmdline: name.to_string(),
+                    user: "www-data".to_string(),
+                    sha256: None,
+                    original_filename: None,
+                    lineage: Vec::new(),
+                    cpu_usage: 0.0,
+                    memory_bytes: 0,
+                    run_time_secs: 0,
+                    exe_exists_on_disk: true,
+                    is_deleted_binary: false,
+                    open_sockets_count: 0,
+                    max_severity: Severity::Safe,
+                },
+            );
+        }
+
+        let chosen = attribute_socket_pids(&[400, 9001], &mut procs);
+        assert_eq!(chosen, Some(9001));
+        assert_eq!(procs[&400].open_sockets_count, 1);
+        assert_eq!(procs[&9001].open_sockets_count, 1);
     }
 }

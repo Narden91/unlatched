@@ -1,5 +1,6 @@
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::net::IpAddr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -12,6 +13,7 @@ pub enum Severity {
 }
 
 impl Severity {
+    #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             Severity::Critical => "CRITICAL",
@@ -22,6 +24,7 @@ impl Severity {
         }
     }
 
+    #[must_use]
     pub fn penalty_points(&self) -> u32 {
         match self {
             Severity::Critical => 30,
@@ -33,7 +36,7 @@ impl Severity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Protocol {
     Tcp,
     Tcp6,
@@ -42,6 +45,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Protocol::Tcp => "TCP",
@@ -51,40 +55,56 @@ impl Protocol {
         }
     }
 
+    #[must_use]
     pub fn is_tcp(&self) -> bool {
         matches!(self, Protocol::Tcp | Protocol::Tcp6)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExposureScope {
     Loopback,
+    LoopbackProxy,
     LocalLan,
     WildcardAllInterfaces,
     PublicInternet,
 }
 
 impl ExposureScope {
+    #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             ExposureScope::Loopback => "Loopback (Local Only)",
+            ExposureScope::LoopbackProxy => "Loopback via Exposed Proxy",
             ExposureScope::LocalLan => "LAN Interface",
             ExposureScope::WildcardAllInterfaces => "0.0.0.0 / :: (All Ifaces)",
             ExposureScope::PublicInternet => "Public Interface",
         }
     }
 
+    #[must_use]
     pub fn short_label(&self) -> &'static str {
         match self {
             ExposureScope::Loopback => "LOCAL",
+            ExposureScope::LoopbackProxy => "PROXY-EXP",
             ExposureScope::LocalLan => "LAN",
             ExposureScope::WildcardAllInterfaces => "WILDCARD",
             ExposureScope::PublicInternet => "PUBLIC",
         }
     }
+
+    #[must_use]
+    pub fn is_network_reachable(&self) -> bool {
+        matches!(
+            self,
+            ExposureScope::LocalLan
+                | ExposureScope::WildcardAllInterfaces
+                | ExposureScope::PublicInternet
+        )
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IpCategory {
     Unspecified,
     Loopback,
@@ -94,6 +114,7 @@ pub enum IpCategory {
 }
 
 impl IpCategory {
+    #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             IpCategory::Unspecified => "Any (*)",
@@ -114,6 +135,8 @@ pub struct ProcessRecord {
     pub cmdline: String,
     pub user: String,
     pub sha256: Option<String>,
+    #[serde(default)]
+    pub original_filename: Option<String>,
     pub lineage: Vec<String>,
     pub cpu_usage: f32,
     pub memory_bytes: u64,
@@ -148,10 +171,20 @@ pub struct ConnectionEntry {
 }
 
 impl ConnectionEntry {
+    #[must_use]
     pub fn local_endpoint(&self) -> String {
         format_endpoint(self.local_ip, self.local_port)
     }
 
+    #[must_use]
+    pub fn has_remote_peer(&self) -> bool {
+        match (self.remote_ip, self.remote_port) {
+            (Some(ip), Some(port)) => !ip.is_unspecified() || port != 0,
+            _ => false,
+        }
+    }
+
+    #[must_use]
     pub fn remote_endpoint(&self) -> String {
         match (self.remote_ip, self.remote_port) {
             (Some(ip), Some(port)) if !ip.is_unspecified() || port != 0 => {
@@ -161,25 +194,33 @@ impl ConnectionEntry {
         }
     }
 
+    #[must_use]
     pub fn remote_display(&self) -> String {
+        if !self.has_remote_peer() {
+            return "*:*".to_string();
+        }
         let ep = self.remote_endpoint();
         if let Some(host) = &self.remote_hostname {
-            if !host.is_empty() && ep != "*:*" {
+            if !host.is_empty() {
                 return format!("{} ({})", ep, host);
             }
         }
         ep
     }
 
+    /// Zero-allocation listener predicate safe for hot sort comparators.
+    #[must_use]
     pub fn is_listening(&self) -> bool {
-        self.state == "LISTEN" || (self.state == "OPEN" && self.remote_endpoint() == "*:*")
+        self.state == "LISTEN" || (self.state == "OPEN" && !self.has_remote_peer())
     }
 
+    #[must_use]
     pub fn is_established(&self) -> bool {
         self.state == "ESTABLISHED"
     }
 }
 
+#[must_use]
 pub fn format_endpoint(ip: IpAddr, port: u16) -> String {
     match ip {
         IpAddr::V4(v4) => format!("{}:{}", v4, port),
@@ -211,6 +252,7 @@ pub enum AuditStatus {
 }
 
 impl AuditStatus {
+    #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             AuditStatus::Pass => "PASS",
@@ -220,6 +262,7 @@ impl AuditStatus {
         }
     }
 
+    #[must_use]
     pub fn to_severity(&self) -> Severity {
         match self {
             AuditStatus::Critical => Severity::Critical,
@@ -241,15 +284,54 @@ pub struct AuditItem {
     pub details: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TimelineKind {
+    ListenerOpened,
+    ListenerClosed,
+    ConnectionOpened,
+    ConnectionClosed,
+    BinaryModified,
+    BeaconSuspected,
+}
+
+impl TimelineKind {
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            TimelineKind::ListenerOpened => "+LISTEN",
+            TimelineKind::ListenerClosed => "-LISTEN",
+            TimelineKind::ConnectionOpened => "+SOCKET",
+            TimelineKind::ConnectionClosed => "-SOCKET",
+            TimelineKind::BinaryModified => "!HASH",
+            TimelineKind::BeaconSuspected => "!BEACON",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineEvent {
+    pub timestamp: DateTime<Local>,
+    pub kind: TimelineKind,
+    pub severity: Severity,
+    pub process_name: String,
+    pub pid: Option<u32>,
+    pub endpoint: String,
+    pub summary: String,
+}
+
 /// Characters a terminal or text viewer acts on instead of showing: C0/C1 controls (ESC starts
 /// cursor, erase and title sequences) and bidi controls (U+202E makes a name read backwards).
 fn is_unsafe_char(c: char) -> bool {
     c.is_control()
-        || matches!(c, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        || matches!(
+            c,
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
 }
 
 /// `None` when `s` is safe to print. Otherwise a copy with each unsafe char written as `\u{..}`,
 /// so the evidence stays readable but cannot drive the terminal.
+#[must_use]
 pub fn neutralized(s: &str) -> Option<String> {
     if !s.chars().any(is_unsafe_char) {
         return None;
@@ -263,6 +345,54 @@ pub fn neutralized(s: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// Zero-allocation case-insensitive substring match when `needle_lower` is ASCII.
+#[must_use]
+pub fn contains_ci(haystack: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    if needle_lower.is_ascii() {
+        let nb = needle_lower.as_bytes();
+        let hb = haystack.as_bytes();
+        if hb.len() < nb.len() {
+            return false;
+        }
+        hb.windows(nb.len())
+            .any(|w| w.eq_ignore_ascii_case(nb))
+    } else {
+        haystack.to_lowercase().contains(needle_lower)
+    }
+}
+
+/// Zero-allocation ASCII case-insensitive comparator for hot sort routines.
+#[must_use]
+pub fn cmp_ci(a: &str, b: &str) -> Ordering {
+    a.bytes()
+        .map(|c| c.to_ascii_lowercase())
+        .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+}
+
+/// 100 minus each finding's penalty, floored at 0, plus a letter grade.
+/// The score counts findings. It does not measure how secure the host is.
+#[must_use]
+pub fn score_and_grade(findings: &[SecurityFinding], incomplete: bool) -> (u8, String) {
+    let penalty: u32 = findings.iter().map(|f| f.severity.penalty_points()).sum();
+    let score = 100u32.saturating_sub(penalty) as u8;
+    let grade = if incomplete {
+        "INCOMPLETE"
+    } else {
+        match score {
+            95..=100 => "A+",
+            85..=94 => "A",
+            75..=84 => "B",
+            60..=74 => "C",
+            40..=59 => "D",
+            _ => "F",
+        }
+    };
+    (score, grade.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,6 +412,9 @@ pub struct ScanSnapshot {
     /// Sockets whose program path is unknown, usually because the scan is not elevated.
     #[serde(default)]
     pub sockets_without_exe: usize,
+    /// Findings suppressed via cryptographic SHA-256 allowlist.
+    #[serde(default)]
+    pub suppressed_count: usize,
     pub total_connections: usize,
     pub listening_ports: usize,
     pub established_connections: usize,
@@ -295,9 +428,68 @@ pub struct ScanSnapshot {
     pub findings: Vec<SecurityFinding>,
     pub audit_items: Vec<AuditItem>,
     pub processes: Vec<ProcessRecord>,
+    #[serde(default)]
+    pub timeline_events: Vec<TimelineEvent>,
 }
 
 impl ScanSnapshot {
+    /// Single-pass aggregation of socket and finding counters plus score/grade recalculation.
+    pub fn recompute_summary(&mut self) {
+        let mut sockets_without_exe = 0usize;
+        let mut listening_ports = 0usize;
+        let mut established_connections = 0usize;
+        let mut external_connections = 0usize;
+        let mut suspicious_connections = 0usize;
+
+        for c in &self.connections {
+            if c.exe_path.is_empty() {
+                sockets_without_exe += 1;
+            }
+            if c.is_listening() {
+                listening_ports += 1;
+            }
+            if c.is_established() {
+                established_connections += 1;
+            }
+            if c.remote_category == IpCategory::PublicInternet {
+                external_connections += 1;
+            }
+            if c.severity >= Severity::Medium {
+                suspicious_connections += 1;
+            }
+        }
+
+        let mut critical_count = 0usize;
+        let mut high_count = 0usize;
+        let mut medium_count = 0usize;
+        let mut low_count = 0usize;
+
+        for f in &self.findings {
+            match f.severity {
+                Severity::Critical => critical_count += 1,
+                Severity::High => high_count += 1,
+                Severity::Medium => medium_count += 1,
+                Severity::Low => low_count += 1,
+                Severity::Safe => {}
+            }
+        }
+
+        self.total_connections = self.connections.len();
+        self.sockets_without_exe = sockets_without_exe;
+        self.listening_ports = listening_ports;
+        self.established_connections = established_connections;
+        self.external_connections = external_connections;
+        self.suspicious_connections = suspicious_connections;
+        self.critical_count = critical_count;
+        self.high_count = high_count;
+        self.medium_count = medium_count;
+        self.low_count = low_count;
+
+        let (score, grade) = score_and_grade(&self.findings, !self.scan_warnings.is_empty());
+        self.security_score = score;
+        self.security_grade = grade;
+    }
+
     /// Make every text field safe to print. Run it after detection: the rules must see the
     /// raw text, while the CLI, TUI and Markdown must not pass attacker bytes to a terminal.
     pub fn neutralize_text(&mut self) {
@@ -372,8 +564,13 @@ impl ScanSnapshot {
                 fix(s);
             }
             fix_opt(&mut p.sha256);
+            fix_opt(&mut p.original_filename);
             fix_all(&mut p.lineage);
+        }
+        for ev in &mut self.timeline_events {
+            for s in [&mut ev.process_name, &mut ev.endpoint, &mut ev.summary] {
+                fix(s);
+            }
         }
     }
 }
-

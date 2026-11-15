@@ -5,9 +5,9 @@
 [![Windows 11](https://img.shields.io/badge/Windows%2011-tested-0078D6?logo=windows&logoColor=white)](#install)
 [![Linux](https://img.shields.io/badge/Linux%20(WSL)-tested-FCC624?logo=linux&logoColor=black)](#install)
 
-Unlatched shows which program owns each network connection on your computer. It flags connections that look like remote command shells, programs started from temp folders, services open to the whole network, and common ways malware keeps running after a restart.
+Unlatched inspects which process owns every TCP and UDP socket on the local host. It correlates sockets with process ancestry, on-disk SHA-256 digests, PE `VS_VERSION_INFO` version metadata, transitive reverse-proxy exposure paths, temporal C2 beaconing intervals, and host persistence surfaces.
 
-It runs on the computer you want to check. It does not scan other machines.
+It runs locally on the endpoint being inspected. It never scans remote hosts.
 
 ![Unlatched overview](docs/assets/tui-overview.svg)
 
@@ -19,33 +19,31 @@ It runs on the computer you want to check. It does not scan other machines.
 
 ## What it checks
 
-Each connection shows the program, its process ID (PID, the number the system gives a running program), the full command line, the chain of parent programs, the file's SHA-256 fingerprint, and the remote host name when one is found.
+Each connection maps to its owning process ID (PID), parent lineage chain, command line, executable SHA-256 digest, PE `OriginalFilename` (on Windows), exposure scope, and validated reverse-DNS hostname.
 
 | ID | What it flags |
 | :--- | :--- |
-| `H01` | A command shell (`cmd`, PowerShell, `bash`, `sh`) or a network relay tool (`nc`, `ncat`, `socat`) holds a connection. Also short scripts that open a remote shell. |
-| `H02` | A program runs from a temp folder, a shared folder, or the Recycle Bin. |
-| `H03` | A program runs from a file that was deleted or exists only in memory. |
-| `H04` | A program pretends to be a system process, such as a fake `svchost.exe` outside the Windows system folder. |
-| `H05` | A connection uses a port often tied to remote-access tools, crypto miners, or botnets, such as `4444` or `31337`. |
-| `H06` | A remote-access or database service listens on all network interfaces. Also a web or database server that starts a command shell. |
-| `H07` | A PowerShell command hides its payload, downloads and runs code, or misuses a Windows tool to run remote code. |
+| `H01` | Interactive shells (`cmd`, PowerShell, `bash`, `sh`) or raw relays (`nc`, `ncat`, `socat`) holding sockets, including inline interpreter reverse shells and renamed shell binaries. |
+| `H02` | Processes executing from temporary, shared-memory, or world-writable paths (`/tmp`, `/dev/shm`, `%TEMP%`, `Users\Public`, Recycle Bin). |
+| `H03` | Processes executing from unlinked/deleted binaries or `memfd:` memory descriptors. |
+| `H04` | System process masquerading: path spoofing (including `System32` subdirectories), typosquats, fake Linux kernel threads, and **copied/renamed PE utilities & LOLBins** (`H04-RENAMED-BINARY`, e.g. `powershell.exe` renamed to `updater.exe`). |
+| `H05` | Listeners or outbound connections on ports commonly associated with RATs, C2 frameworks, or mining pools (`4444`, `31337`, `1337`, `5555`, `2375`, etc.). |
+| `H06` | Sensitive services bound to `0.0.0.0`/`::` and shells spawned anywhere under a web or database server ancestor chain. |
+| `H07` | Encoded PowerShell flags (`-e`/`-enc`/`-encodedcommand`), download cradles, `/dev/tcp`, `curl \| sh`, and Windows LOLBin scriptlet execution. |
+| `H08` | **Transitive Loopback-Proxy Exposure** (`PROXY-EXP`): services bound to `127.0.0.1`/`[::1]` that are actively bridged by a local process listening on `0.0.0.0`/`::`, LAN, or a public IP. |
+| `H09` | **Statistical C2 Beaconing**: periodic low-jitter outbound callback flows detected across live/watch scans using Welford's online variance ($n \ge 4$ intervals, $CV = s/\mu \le 0.20$). |
 
-`H05` checks the port number only. A legitimate program on port 4444 gets flagged, so check the program path before you stop it.
+**Windows host audit:** Defender Firewall profile states (including Group Policy overrides), Registry `Run`/`RunOnce` keys, Registry-resolved `Startup` folders, and Winlogon `Shell` + `Userinit` helpers.
 
-The scan also reads the hosts file. An entry that sends an update or antivirus domain to another address is Critical. An entry that blocks it by pointing it to `0.0.0.0` is a Warning, because many blocklists do that.
+**Linux host audit:** `ufw`/netfilter state, `/etc/ld.so.preload`, `/etc/crontab`, `/etc/cron.d/*`, `/etc/rc.local`, `sshd_config` (`PermitRootLogin`, `PermitEmptyPasswords`), and systemd `ExecStart` units.
 
-**Windows also checks:** firewall profiles, programs that start at sign-in (Run keys and Startup folders), and the Winlogon shell.
-
-**Linux also checks:** the firewall (ufw or nftables), `/etc/ld.so.preload`, cron and `rc.local` entries, root and empty-password logins in `sshd_config`, and `ExecStart` lines in systemd service files.
-
-The header shows a score from 0 to 100. Each finding lowers it. The score counts findings only. It does not measure how secure the computer is.
+**Hosts file audit:** Redirects of OS update or antivirus domains to external IPs are flagged as `Critical`; `0.0.0.0`/loopback blocklist sinkholes are aggregated into a single `Warning`/`Medium` item.
 
 ## Install
 
 ### Windows
 
-Install Rust with [rustup](https://rustup.rs/). Choose the MSVC toolchain, which needs the Visual Studio C++ build tools. Then run:
+Install Rust (`>= 1.94`) via [rustup](https://rustup.rs/) with the MSVC toolchain:
 
 ```powershell
 git clone https://github.com/Narden91/unlatched.git
@@ -53,117 +51,67 @@ cd unlatched
 cargo build --release
 ```
 
-The program is at `target\release\safe_door_scanner.exe`.
+The binary is built at `target\release\safe_door_scanner.exe`.
 
 ### Linux
 
-Install Rust with [rustup](https://rustup.rs/) or your distribution's package manager. Then run:
-
 ```bash
 git clone https://github.com/Narden91/unlatched.git
 cd unlatched
 cargo build --release
 ```
-
-## Run
-
-Without admin rights the scan still runs. Some process names come back blank, and some checks are skipped. The header shows `No exe path: x/y` when a program path is missing, so you can see how much the scan could not read.
-
-**Windows** (in an Administrator terminal):
-
-```powershell
-.\target\release\safe_door_scanner.exe
-```
-
-**Linux** (as root):
-
-```bash
-sudo ./target/release/safe_door_scanner
-```
-
-Run `safe_door_scanner --help` for all options.
 
 ## Command-line mode
 
 | Option | Effect |
 | :--- | :--- |
-| `--cli` | Print a summary and exit |
-| `--flagged` | Hide connections that have no findings |
-| `--json` | Print the full scan as JSON |
-| `--export-md FILE` | Write a Markdown report |
-| `--export-json FILE` | Write a JSON report |
-| `--diff FILE` | Compare this scan with an earlier JSON report |
+| `--cli` | Print a terminal report and exit |
+| `--flagged` | Show only flagged sockets in `--cli` output |
+| `--json` | Print the full `ScanSnapshot` as JSON to stdout |
+| `--export-md FILE` | Write a sanitized Markdown security report |
+| `--export-json FILE` | Write a JSON snapshot report |
+| `--export-sarif FILE` | Write an **OASIS SARIF v2.1.0** report for GitHub Security / SIEM ingestion |
+| `--diff FILE` | Compare against an earlier `--export-json` baseline (including exposure escalations) |
+| `--allowlist FILE` | Suppress findings matching cryptographic 64-hex SHA-256 rules in `FILE` |
+| `--watch SECS` | Continuous headless flight-recorder & C2 beacon monitor polling every `SECS` seconds |
+| `--watch-cycles N` | Exit `--watch` mode after `N` scan cycles |
 
 ```powershell
-.\target\release\safe_door_scanner.exe --cli --flagged
-.\target\release\safe_door_scanner.exe --cli --export-md unlatched.md --export-json unlatched.json
+# One-shot flagged triage + SARIF v2.1.0 export
+.\target\release\safe_door_scanner.exe --cli --flagged --export-sarif results.sarif.json
+
+# Headless 5-second watch mode with SHA-256 allowlist
+.\target\release\safe_door_scanner.exe --watch 5 --allowlist safe_door_allowlist.json
 ```
 
-The exit code is `2` when the scan finds at least one Critical item, in every command-line mode. It is `0` otherwise.
+Exit code is `2` whenever at least one un-suppressed `Critical` finding is present, and `0` otherwise.
 
-If a check fails, for example the list of connections cannot be read, the report shows a warning and the grade reads `INCOMPLETE`.
-
-### Compare with an earlier scan
-
-Save a baseline on a known-good day, then compare later:
-
-```powershell
-.\target\release\safe_door_scanner.exe --export-json baseline.json
-.\target\release\safe_door_scanner.exe --diff baseline.json
-```
-
-The comparison lists:
-
-- new listening ports,
-- new programs that hold connections,
-- new startup entries,
-- programs whose file changed (same path, different SHA-256).
-
-Programs match by file path, not PID. A known program that moves to a new random port (32768 and up) is not reported. Run both scans with the same rights.
-
-## Keys in the terminal window
+## Keys in the TUI
 
 | Key | Action |
 | :--- | :--- |
-| `1` to `5`, `Tab`, `Shift+Tab` | Switch tabs: Overview, Connections, Findings, Audit, Processes |
-| `Up` / `Down`, `j` / `k` | Move the selection |
-| `PgUp` / `PgDn` | Jump 10 rows |
-| `f` | Filter connections: All, Listening, Established, Public IP, Flagged |
-| `s` | Sort: Risk, Port, Process, State, PID |
-| `/` | Search the current table |
-| `r` | Scan now. The scan runs in the background, and the screen stays responsive |
-| `a` | Auto-refresh every 3 s or 10 s, or pause |
-| `e` | Write `safe_door_report.json` and `safe_door_report.md` |
-| `Enter`, `d` | Show details |
-| `?`, `h` | Show help |
-| `q`, `Esc` | Close a window, clear the search, or quit |
-
-A `+` before a process name in the Connections tab marks a listening port that did not exist when the window opened.
+| `1` to `6`, `Tab`, `Shift+Tab` | Switch views: Overview, Connections, Findings, Audit, Processes, **Events** |
+| `Up` / `Down`, `j` / `k`, `PgUp` / `PgDn` | Navigate table rows |
+| `f` | Cycle connection filter (`All`, `Listening`, `Established`, `Public IP`, `Flagged`) |
+| `s` | Cycle connection sort (`Risk`, `Port`, `Process`, `State`, `PID`) |
+| `/` | Live substring filter across the active tab |
+| `w` | Add the selected binary's **SHA-256** digest to `safe_door_allowlist.json` |
+| `r` | Trigger an immediate background scan |
+| `a` | Cycle auto-refresh (`3s`, `10s`, `Paused`) |
+| `e` | Export `safe_door_report.json`, `safe_door_report.md`, and `safe_door_report.sarif.json` |
+| `Enter`, `d` | Open full row inspector modal |
+| `?`, `h` | Open keyboard and heuristic reference modal |
+| `q`, `Esc` | Close modal, clear search, or quit |
 
 ## Running with admin rights safely
 
-Anyone who can write to a folder can replace the program in it. If you run that copy as Administrator or root, they get those rights too.
+Copy the release binary into an administrator-owned directory (`C:\Program Files\Unlatched\` on Windows, `/usr/local/bin/` on Linux) before running elevated. Self-protection controls built into the scanner:
 
-Copy the program to a folder that only administrators can write to, then run the copy:
-
-- Windows: `C:\Program Files\Unlatched\`
-- Linux: `/usr/local/bin/`
-
-The program also protects itself in these ways:
-
-- It starts its helper tools (`nslookup` on Windows, `getent` on Linux) by full path. A fake copy in the program's folder is not run.
-- On Windows it loads its system libraries from the Windows system folder only. This does not cover libraries it loads while it runs.
-- It shows unusual characters in names as escape text, such as `\u{1b}`. A process name cannot change what your terminal displays. The same applies to the JSON and Markdown reports.
-- It writes each report to a new file and then renames it into place. A link placed at the report name is replaced, not followed.
-
-## What it does not do
-
-- It does not prove that a computer is clean. It reports patterns. An attacker can rename programs or use methods these rules do not cover.
-- It checks one computer only. It does not scan your network.
-- `H05` uses port numbers only, so it produces false alarms on legitimate programs.
-- Some reverse DNS names stay empty. A one-shot run waits up to 2 seconds for them.
-- Some results need admin rights. Without them, the report is incomplete, and the header says so.
-- The score is a count of findings, not a security grade.
+- **No outbound SMB / symlink traversal:** All file reads reject Windows UNC/device paths (`\\server\share`, `\\.\`), open files with `FILE_FLAG_OPEN_REPARSE_POINT` / inode verification (`lstat == fstat`), and enforce strict byte caps.
+- **Hardened child execution & DLL loading:** Windows `build.rs` sets `/DEPENDENTLOADFLAG:0x800` (`LOAD_LIBRARY_SEARCH_SYSTEM32`); reverse-DNS helpers execute by absolute system path with cleared environments and strict hostname character validation.
+- **Terminal & Markdown neutralization:** Control characters, ANSI escapes, and Unicode bidi overrides are escaped before TUI, CLI, JSON, SARIF, or Markdown output.
+- **Atomic owner-only exports:** Reports verify parent directories are not symlinks or NTFS junctions, write through unpredictable `.tmp` files (`0600` on Unix), and atomically rename into place.
+- **Tamper-evident allowlisting:** Allowlist entries require a full 64-hex SHA-256 binary digest; modifying or replacing an allowlisted binary on disk automatically invalidates suppression.
 
 ## License
 

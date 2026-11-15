@@ -2,8 +2,11 @@
 //! A known-good baseline cuts false positives: only what changed is reported.
 
 use crate::models::{ConnectionEntry, ScanSnapshot};
+use crate::scanner::fs_safe::read_bounded_string;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
+
+const MAX_BASELINE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Audit checks that list autostart entries. Firewall and privilege rows are not persistence.
 const PERSISTENCE_CHECKS: &[&str] = &[
@@ -12,9 +15,11 @@ const PERSISTENCE_CHECKS: &[&str] = &[
     "AUD-LIN-SCHED",
     "AUD-SYSTEMD",
     "AUD-WINLOGON-01",
+    "AUD-WINLOGON-02",
 ];
 
-/// Identity of a socket that survives PID changes and ephemeral source ports.
+/// Identity of a socket that survives PID changes and ephemeral source ports while catching
+/// interface exposure escalations (`127.0.0.1` -> `0.0.0.0` or `PROXY-EXP`).
 pub fn socket_key(c: &ConnectionEntry) -> String {
     let owner = if c.exe_path.is_empty() {
         &c.process_name
@@ -23,13 +28,19 @@ pub fn socket_key(c: &ConnectionEntry) -> String {
     };
     if c.is_listening() {
         // OS-chosen ports (32768 and up) change on every run. A known program on a new random port
-        // is not news, so key on the program alone. A new program on a high port still shows up.
+        // is not news, so key on the program + exposure scope. A new program on a high port still shows up.
         let port = if c.local_port >= 32768 {
             "ephemeral".to_string()
         } else {
             c.local_port.to_string()
         };
-        format!("L|{}|{}|{}", c.protocol.as_str(), port, owner)
+        format!(
+            "L|{}|{}|{}|{}",
+            c.protocol.as_str(),
+            c.exposure.short_label(),
+            port,
+            owner
+        )
     } else {
         format!("C|{}|{}|{}", c.protocol.as_str(), owner, c.remote_endpoint())
     }
@@ -40,7 +51,7 @@ fn owner_key(exe_path: &str, name: &str) -> String {
 }
 
 pub fn load(path: &Path) -> Result<ScanSnapshot, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let text = read_bounded_string(path, MAX_BASELINE_BYTES)?;
     // Windows PowerShell redirects and `Out-File -Encoding utf8` write a BOM that serde_json rejects.
     let mut snapshot: ScanSnapshot = serde_json::from_str(text.trim_start_matches('\u{feff}'))
         .map_err(|e| format!("{}: not a scan JSON ({e})", path.display()))?;
@@ -64,8 +75,16 @@ pub fn diff_snapshots(old: &ScanSnapshot, new: &ScanSnapshot) -> SnapshotDiff {
     if old.is_elevated != new.is_elevated {
         d.notes.push(format!(
             "Baseline ran {} and this scan runs {}. Hidden processes make the diff unreliable.",
-            if old.is_elevated { "elevated" } else { "unelevated" },
-            if new.is_elevated { "elevated" } else { "unelevated" },
+            if old.is_elevated {
+                "elevated"
+            } else {
+                "unelevated"
+            },
+            if new.is_elevated {
+                "elevated"
+            } else {
+                "unelevated"
+            },
         ));
     }
     if !old.scan_warnings.is_empty() || !new.scan_warnings.is_empty() {
@@ -77,11 +96,16 @@ pub fn diff_snapshots(old: &ScanSnapshot, new: &ScanSnapshot) -> SnapshotDiff {
     for c in new.connections.iter().filter(|c| c.is_listening()) {
         if !old_sockets.contains(&socket_key(c)) {
             d.new_listeners.insert(format!(
-                "{} {} {} ({})",
+                "{} {} [{}] {} ({})",
                 c.protocol.as_str(),
                 c.local_endpoint(),
+                c.exposure.short_label(),
                 c.process_name,
-                if c.exe_path.is_empty() { "path unknown" } else { &c.exe_path }
+                if c.exe_path.is_empty() {
+                    "path unknown"
+                } else {
+                    &c.exe_path
+                }
             ));
         }
     }
@@ -101,9 +125,8 @@ pub fn diff_snapshots(old: &ScanSnapshot, new: &ScanSnapshot) -> SnapshotDiff {
         }
     }
 
-    let persistence_key = |check_id: &str, location: &str, value: &str| {
-        format!("{check_id}|{location}|{value}")
-    };
+    let persistence_key =
+        |check_id: &str, location: &str, value: &str| format!("{check_id}|{location}|{value}");
     let old_autostart: HashSet<String> = old
         .audit_items
         .iter()
@@ -155,7 +178,10 @@ impl SnapshotDiff {
             ("New listeners", &self.new_listeners),
             ("New socket-owning programs", &self.new_owners),
             ("New autostart entries", &self.new_autostart),
-            ("Changed binaries (same path, new SHA-256)", &self.changed_hashes),
+            (
+                "Changed binaries (same path, new SHA-256)",
+                &self.changed_hashes,
+            ),
         ];
         let mut any = false;
         for (title, items) in sections {
@@ -183,6 +209,7 @@ mod tests {
     use super::*;
     use crate::models::{
         AuditItem, AuditStatus, ExposureScope, IpCategory, ProcessRecord, Protocol, Severity,
+        TimelineEvent, TimelineKind,
     };
     use chrono::Local;
     use std::net::{IpAddr, Ipv4Addr};
@@ -220,6 +247,7 @@ mod tests {
             cmdline: String::new(),
             user: "u".to_string(),
             sha256: Some(sha.to_string()),
+            original_filename: None,
             lineage: Vec::new(),
             cpu_usage: 0.0,
             memory_bytes: 0,
@@ -260,6 +288,7 @@ mod tests {
             security_grade: "A+".to_string(),
             scan_warnings: Vec::new(),
             sockets_without_exe: 0,
+            suppressed_count: 0,
             total_connections: connections.len(),
             listening_ports: 0,
             established_connections: 0,
@@ -273,6 +302,7 @@ mod tests {
             findings: Vec::new(),
             audit_items,
             processes,
+            timeline_events: Vec::new(),
         }
     }
 
@@ -289,7 +319,6 @@ mod tests {
 
     #[test]
     fn untrusted_text_is_neutralized_in_snapshot_and_baseline() {
-        // OSC title, cursor-up + erase-line (hides the line above), C1 CSI, and a U+202E name spoof.
         let evil = "a\u{1b}]0;PWNED\u{7}\u{1b}[1A\u{1b}[2K\u{9b}2J\u{202e}txt.exe";
         let mut conn = listener(1, 80, evil);
         conn.cmdline = evil.to_string();
@@ -299,6 +328,7 @@ mod tests {
         let mut proc_rec = process(1, evil, "abc");
         proc_rec.name = evil.to_string();
         proc_rec.cmdline = evil.to_string();
+        proc_rec.original_filename = Some(evil.to_string());
         let mut item = autostart(evil);
         item.name = evil.to_string();
         let mut snap = snapshot(vec![conn], vec![proc_rec], vec![item]);
@@ -316,11 +346,24 @@ mod tests {
             evidence: evil.to_string(),
             remediation: evil.to_string(),
         });
+        snap.timeline_events.push(TimelineEvent {
+            timestamp: Local::now(),
+            kind: TimelineKind::ListenerOpened,
+            severity: Severity::Medium,
+            process_name: evil.to_string(),
+            pid: Some(1),
+            endpoint: evil.to_string(),
+            summary: evil.to_string(),
+        });
 
         let raw = serde_json::to_value(&snap).unwrap();
-        assert!(unsafe_strings(&raw) > 10, "the test input must start unsafe");
+        assert!(
+            unsafe_strings(&raw) > 10,
+            "the test input must start unsafe"
+        );
 
-        let path = std::env::temp_dir().join(format!("unlatched_evil_{}.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("unlatched_evil_{}.json", std::process::id()));
         std::fs::write(&path, raw.to_string()).unwrap();
         let loaded = load(&path).unwrap();
         std::fs::remove_file(&path).unwrap();
@@ -328,7 +371,6 @@ mod tests {
 
         snap.neutralize_text();
         assert_eq!(unsafe_strings(&serde_json::to_value(&snap).unwrap()), 0);
-        // The evidence stays readable as text.
         assert!(snap.processes[0].cmdline.contains("\\u{1b}]0;PWNED"));
         assert!(snap.processes[0].name.contains("\\u{202e}txt.exe"));
     }
@@ -336,7 +378,10 @@ mod tests {
     #[test]
     fn diff_reports_changes_and_ignores_pid_churn() {
         let old = snapshot(
-            vec![listener(10, 8080, "/bin/app"), listener(10, 50000, "/bin/app")],
+            vec![
+                listener(10, 8080, "/bin/app"),
+                listener(10, 50000, "/bin/app"),
+            ],
             vec![process(10, "/bin/app", "aaaaaaaaaaaaaaaa")],
             vec![autostart("/bin/app")],
         );
@@ -363,5 +408,31 @@ mod tests {
         assert_eq!(d.new_autostart.len(), 1);
         assert_eq!(d.changed_hashes.len(), 1);
         assert!(diff_snapshots(&old, &old).render().contains("No changes."));
+    }
+
+    #[test]
+    fn diff_catches_listener_exposure_escalation() {
+        let mut lo_listener = listener(10, 6379, "/usr/bin/redis-server");
+        lo_listener.local_ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        lo_listener.exposure = ExposureScope::Loopback;
+
+        let wild_listener = listener(10, 6379, "/usr/bin/redis-server");
+
+        let old = snapshot(
+            vec![lo_listener],
+            vec![process(10, "/usr/bin/redis-server", "aaaa")],
+            Vec::new(),
+        );
+        let new = snapshot(
+            vec![wild_listener],
+            vec![process(10, "/usr/bin/redis-server", "aaaa")],
+            Vec::new(),
+        );
+        let d = diff_snapshots(&old, &new);
+        assert_eq!(
+            d.new_listeners.len(),
+            1,
+            "127.0.0.1 -> 0.0.0.0 scope escalation must be flagged as a new listener"
+        );
     }
 }

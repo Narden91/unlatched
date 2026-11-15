@@ -1,6 +1,6 @@
 use crate::app::{ActiveTab, App};
 use crate::baseline::socket_key;
-use crate::models::{AuditStatus, Severity};
+use crate::models::{AuditStatus, ExposureScope, Severity, TimelineKind};
 use crate::report::truncate_str;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -38,6 +38,67 @@ fn audit_status_color(status: AuditStatus) -> Color {
     }
 }
 
+fn exposure_color(scope: ExposureScope) -> Color {
+    match scope {
+        ExposureScope::Loopback => COL_SAFE,
+        ExposureScope::LoopbackProxy => COL_HIGH,
+        ExposureScope::LocalLan => COL_LOW,
+        ExposureScope::WildcardAllInterfaces | ExposureScope::PublicInternet => COL_MED,
+    }
+}
+
+fn timeline_kind_color(kind: TimelineKind) -> Color {
+    match kind {
+        TimelineKind::BeaconSuspected | TimelineKind::BinaryModified => COL_CRIT,
+        TimelineKind::ListenerOpened => COL_HIGH,
+        TimelineKind::ConnectionOpened => COL_LOW,
+        TimelineKind::ListenerClosed | TimelineKind::ConnectionClosed => COL_MUTED,
+    }
+}
+
+fn styled_table<'a, I>(
+    rows: Vec<Row<'a>>,
+    widths: I,
+    headers: &[&'a str],
+    title: String,
+) -> Table<'a>
+where
+    I: IntoIterator,
+    I::Item: Into<Constraint>,
+{
+    Table::new(rows, widths)
+        .header(
+            Row::new(headers.iter().copied())
+                .style(Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD)),
+        )
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(COL_ACCENT)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(COL_HIGHLIGHT_BG)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ")
+}
+
+fn inspector_panel<'a>(title: &'a str, lines: Vec<Line<'a>>, wrap: bool) -> Paragraph<'a> {
+    let p = Paragraph::new(lines).block(
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
+    if wrap {
+        p.wrap(Wrap { trim: false })
+    } else {
+        p
+    }
+}
+
 pub fn render(frame: &mut Frame, app: &mut App) {
     let root_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -58,6 +119,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ActiveTab::Findings => render_findings_tab(frame, app, root_chunks[2]),
         ActiveTab::Audit => render_audit_tab(frame, app, root_chunks[2]),
         ActiveTab::Processes => render_processes_tab(frame, app, root_chunks[2]),
+        ActiveTab::Events => render_events_tab(frame, app, root_chunks[2]),
     }
 
     render_footer(frame, app, root_chunks[3]);
@@ -96,7 +158,6 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         )
     };
 
-    // A collector failed, so the counts may be too low. Say so instead of showing a clean score.
     let warn_badge = match snap.scan_warnings.first() {
         Some(w) => Span::styled(
             format!(" [INCOMPLETE: {}] ", truncate_str(w, 60)),
@@ -108,7 +169,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         None => Span::raw(""),
     };
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             " UNLATCHED ",
             Style::default()
@@ -123,16 +184,14 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             format!(" Host: {} ({}) ", snap.hostname, snap.os_name),
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("| ", Style::default().fg(COL_MUTED)),
-        Span::styled("Score: ", Style::default().fg(COL_MUTED)),
+        Span::styled("| Score: ", Style::default().fg(COL_MUTED)),
         Span::styled(
             format!("{}/100 [{}] ", snap.security_score, snap.security_grade),
             Style::default().fg(score_col).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("| ", Style::default().fg(COL_MUTED)),
         Span::styled(
             format!(
-                "Scan: {}ms ({}) @ {}{}",
+                "| Scan: {}ms ({}) @ {}{}",
                 snap.scan_duration_ms,
                 app.refresh_mode.label(),
                 snap.timestamp.format("%H:%M:%S"),
@@ -140,23 +199,28 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Style::default().fg(COL_MUTED),
         ),
-        Span::styled(
-            if snap.sockets_without_exe > 0 {
-                format!(
-                    " | No exe path: {}/{}",
-                    snap.sockets_without_exe, snap.total_connections
-                )
-            } else {
-                String::new()
-            },
+    ];
+
+    if snap.suppressed_count > 0 {
+        spans.push(Span::styled(
+            format!(" | Allowlisted: {}", snap.suppressed_count),
+            Style::default().fg(COL_SAFE),
+        ));
+    }
+    if snap.sockets_without_exe > 0 {
+        spans.push(Span::styled(
+            format!(
+                " | No exe path: {}/{}",
+                snap.sockets_without_exe, snap.total_connections
+            ),
             Style::default().fg(COL_MED),
-        ),
-    ]);
+        ));
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(COL_ACCENT));
-    frame.render_widget(Paragraph::new(line).block(block), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
 }
 
 fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
@@ -196,6 +260,13 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 format!("({}) ", snap.processes.len()),
                 Style::default().fg(COL_MUTED),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw(" [6] Events "),
+            Span::styled(
+                format!("({}) ", snap.timeline_events.len()),
+                Style::default().fg(COL_LOW),
             ),
         ]),
     ];
@@ -285,6 +356,11 @@ fn render_overview_tab(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(snap.medium_count.to_string(), Style::default().fg(COL_MUTED)),
         Span::styled("  low ", Style::default().fg(COL_MUTED)),
         Span::styled(snap.low_count.to_string(), Style::default().fg(COL_MUTED)),
+        Span::styled("  events ", Style::default().fg(COL_MUTED)),
+        Span::styled(
+            snap.timeline_events.len().to_string(),
+            Style::default().fg(COL_LOW),
+        ),
     ]);
     frame.render_widget(
         Paragraph::new(status).block(
@@ -324,7 +400,7 @@ fn render_overview_tab(frame: &mut Frame, app: &App, area: Rect) {
                         Style::default().fg(col).add_modifier(Modifier::BOLD),
                     )),
                     Cell::from(Span::styled(
-                        f.rule_id.clone(),
+                        f.rule_id.as_str(),
                         Style::default().fg(COL_MUTED),
                     )),
                     Cell::from(Span::styled(
@@ -363,28 +439,22 @@ fn render_overview_tab(frame: &mut Frame, app: &App, area: Rect) {
         .take(18)
         .map(|c| {
             let col = severity_color(c.severity);
+            let local_ep = truncate_str(&c.local_endpoint(), 21).into_owned();
             Row::new(vec![
                 Cell::from(Span::styled(
                     c.severity.label(),
                     Style::default().fg(col).add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(c.protocol.as_str()),
-                Cell::from(Span::styled(
-                    truncate_str(&c.local_endpoint(), 21),
-                    Style::default().fg(Color::White),
-                )),
+                Cell::from(Span::styled(local_ep, Style::default().fg(Color::White))),
                 Cell::from(Span::styled(
                     truncate_str(&c.process_name, 16),
                     Style::default().fg(COL_ACCENT),
                 )),
-                Cell::from(c.service_name.clone()),
+                Cell::from(c.service_name.as_str()),
                 Cell::from(Span::styled(
                     c.exposure.short_label(),
-                    Style::default().fg(if c.exposure.short_label() == "WILDCARD" {
-                        COL_MED
-                    } else {
-                        COL_SAFE
-                    }),
+                    Style::default().fg(exposure_color(c.exposure)),
                 )),
             ])
         })
@@ -420,35 +490,43 @@ fn render_connections_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Min(8), Constraint::Length(8)])
         .split(area);
 
-    let filtered = app.filtered_connections();
-    let total_shown = filtered.len();
-    let selected_conn = app
-        .conn_table_state
-        .selected()
-        .and_then(|i| filtered.get(i).copied())
-        .cloned();
+    let snap = &app.snapshot;
+    let indices = &app.conn_indices;
+    let new_listeners = &app.new_listeners;
+    let filter_lbl = app.conn_filter.label();
+    let sort_lbl = app.conn_sort.label();
+    let state = &mut app.conn_table_state;
 
-    let rows: Vec<Row> = filtered
+    let selected_conn = state
+        .selected()
+        .and_then(|i| indices.get(i))
+        .and_then(|&idx| snap.connections.get(idx));
+
+    let rows: Vec<Row> = indices
         .iter()
+        .filter_map(|&idx| snap.connections.get(idx))
         .map(|c| {
             let col = severity_color(c.severity);
             let pid_str = c
                 .pid
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "-".to_string());
+            let local_ep = truncate_str(&c.local_endpoint(), 23).into_owned();
+            let rem_ep = truncate_str(&c.remote_display(), 28).into_owned();
+            let is_new = c.is_listening() && new_listeners.contains(&socket_key(c));
             Row::new(vec![
                 Cell::from(Span::styled(
                     c.severity.label(),
                     Style::default().fg(col).add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(c.protocol.as_str()),
-                Cell::from(truncate_str(&c.local_endpoint(), 23)),
-                Cell::from(truncate_str(&c.remote_display(), 28)),
-                Cell::from(c.state.clone()),
+                Cell::from(local_ep),
+                Cell::from(rem_ep),
+                Cell::from(c.state.as_str()),
                 Cell::from(pid_str),
                 Cell::from(Line::from(vec![
                     Span::styled(
-                        if app.new_listeners.contains(&socket_key(c)) { "+ " } else { "" },
+                        if is_new { "+ " } else { "" },
                         Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
@@ -456,20 +534,23 @@ fn render_connections_tab(frame: &mut Frame, app: &mut App, area: Rect) {
                         Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
                     ),
                 ])),
-                Cell::from(c.service_name.clone()),
-                Cell::from(c.exposure.short_label()),
+                Cell::from(c.service_name.as_str()),
+                Cell::from(Span::styled(
+                    c.exposure.short_label(),
+                    Style::default().fg(exposure_color(c.exposure)),
+                )),
             ])
         })
         .collect();
 
     let title = format!(
         " Connections ({})  f:{}  s:{}  (+ = new listener since start) ",
-        total_shown,
-        app.conn_filter.label(),
-        app.conn_sort.label()
+        indices.len(),
+        filter_lbl,
+        sort_lbl
     );
 
-    let table = Table::new(
+    let table = styled_table(
         rows,
         [
             Constraint::Length(9),
@@ -480,11 +561,9 @@ fn render_connections_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(7),
             Constraint::Length(19),
             Constraint::Length(14),
-            Constraint::Min(9),
+            Constraint::Min(10),
         ],
-    )
-    .header(
-        Row::new(vec![
+        &[
             "RISK",
             "PROTO",
             "LOCAL ENDPOINT",
@@ -494,23 +573,11 @@ fn render_connections_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             "PROCESS",
             "SERVICE",
             "SCOPE",
-        ])
-        .style(Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD)),
-    )
-    .block(
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(COL_ACCENT)),
-    )
-    .row_highlight_style(
-        Style::default()
-            .bg(COL_HIGHLIGHT_BG)
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("> ");
+        ],
+        title,
+    );
 
-    frame.render_stateful_widget(table, chunks[0], &mut app.conn_table_state);
+    frame.render_stateful_widget(table, chunks[0], state);
 
     let inspector_lines = if let Some(c) = selected_conn {
         let sev_col = severity_color(c.severity);
@@ -538,9 +605,9 @@ fn render_connections_tab(frame: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(" Binary  : ", Style::default().fg(COL_MUTED)),
                 Span::styled(
                     if c.exe_path.is_empty() {
-                        "<Protected / Kernel Process>".to_string()
+                        "<Protected / Kernel Process>"
                     } else {
-                        c.exe_path.clone()
+                        c.exe_path.as_str()
                     },
                     Style::default().fg(Color::White),
                 ),
@@ -548,17 +615,21 @@ fn render_connections_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             Line::from(vec![
                 Span::styled(" SHA-256 : ", Style::default().fg(COL_MUTED)),
                 Span::styled(
-                    c.sha256
-                        .clone()
-                        .unwrap_or_else(|| "N/A".to_string()),
+                    c.sha256.as_deref().unwrap_or("N/A"),
                     Style::default().fg(COL_MED),
                 ),
                 Span::styled(" | Scope: ", Style::default().fg(COL_MUTED)),
-                Span::styled(c.exposure.label(), Style::default().fg(Color::White)),
+                Span::styled(
+                    c.exposure.label(),
+                    Style::default().fg(exposure_color(c.exposure)),
+                ),
             ]),
             Line::from(vec![
                 Span::styled(" Cmdline : ", Style::default().fg(COL_MUTED)),
-                Span::styled(truncate_str(&c.cmdline, 115), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    truncate_str(&c.cmdline, 115),
+                    Style::default().fg(Color::Gray),
+                ),
             ]),
             Line::from(vec![
                 Span::styled(" Notes   : ", Style::default().fg(COL_MUTED)),
@@ -576,13 +647,7 @@ fn render_connections_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         ))]
     };
 
-    let inspector = Paragraph::new(inspector_lines).block(
-        Block::default()
-            .title(" Socket ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
-    frame.render_widget(inspector, chunks[1]);
+    frame.render_widget(inspector_panel(" Socket ", inspector_lines, false), chunks[1]);
 }
 
 fn render_findings_tab(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -591,14 +656,16 @@ fn render_findings_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Min(8), Constraint::Length(8)])
         .split(area);
 
-    let filtered = app.filtered_findings();
-    let selected_finding = app
-        .finding_table_state
-        .selected()
-        .and_then(|i| filtered.get(i).copied())
-        .cloned();
+    let snap = &app.snapshot;
+    let indices = &app.finding_indices;
+    let state = &mut app.finding_table_state;
 
-    let rows: Vec<Row> = if filtered.is_empty() {
+    let selected_finding = state
+        .selected()
+        .and_then(|i| indices.get(i))
+        .and_then(|&idx| snap.findings.get(idx));
+
+    let rows: Vec<Row> = if indices.is_empty() {
         vec![Row::new(vec![
             Cell::from(Span::styled(
                 "SAFE",
@@ -610,8 +677,9 @@ fn render_findings_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             Cell::from("No security findings detected."),
         ])]
     } else {
-        filtered
+        indices
             .iter()
+            .filter_map(|&idx| snap.findings.get(idx))
             .map(|f| {
                 let col = severity_color(f.severity);
                 Row::new(vec![
@@ -619,7 +687,7 @@ fn render_findings_tab(frame: &mut Frame, app: &mut App, area: Rect) {
                         f.severity.label(),
                         Style::default().fg(col).add_modifier(Modifier::BOLD),
                     )),
-                    Cell::from(f.rule_id.clone()),
+                    Cell::from(f.rule_id.as_str()),
                     Cell::from(truncate_str(&f.category, 24)),
                     Cell::from(truncate_str(&f.mitre_id, 28)),
                     Cell::from(Span::styled(
@@ -631,7 +699,7 @@ fn render_findings_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             .collect()
     };
 
-    let table = Table::new(
+    let table = styled_table(
         rows,
         [
             Constraint::Length(10),
@@ -640,31 +708,11 @@ fn render_findings_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(29),
             Constraint::Min(30),
         ],
-    )
-    .header(
-        Row::new(vec![
-            "SEVERITY",
-            "RULE ID",
-            "CATEGORY",
-            "MITRE ID",
-            "TITLE",
-        ])
-        .style(Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD)),
-    )
-    .block(
-        Block::default()
-            .title(format!(" Findings ({}) ", filtered.len()))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(COL_ACCENT)),
-    )
-    .row_highlight_style(
-        Style::default()
-            .bg(COL_HIGHLIGHT_BG)
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("> ");
+        &["SEVERITY", "RULE ID", "CATEGORY", "MITRE ID", "TITLE"],
+        format!(" Findings ({}) ", indices.len()),
+    );
 
-    frame.render_stateful_widget(table, chunks[0], &mut app.finding_table_state);
+    frame.render_stateful_widget(table, chunks[0], state);
 
     let detail_lines = if let Some(f) = selected_finding {
         let col = severity_color(f.severity);
@@ -679,7 +727,7 @@ fn render_findings_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             ]),
             Line::from(vec![
                 Span::styled(" Description : ", Style::default().fg(COL_MUTED)),
-                Span::styled(f.description.clone(), Style::default().fg(Color::White)),
+                Span::styled(f.description.as_str(), Style::default().fg(Color::White)),
             ]),
             Line::from(vec![
                 Span::styled(" Evidence    : ", Style::default().fg(COL_MUTED)),
@@ -687,7 +735,7 @@ fn render_findings_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             ]),
             Line::from(vec![
                 Span::styled(" Remediation : ", Style::default().fg(COL_MUTED)),
-                Span::styled(f.remediation.clone(), Style::default().fg(COL_SAFE)),
+                Span::styled(f.remediation.as_str(), Style::default().fg(COL_SAFE)),
             ]),
         ]
     } else {
@@ -697,15 +745,10 @@ fn render_findings_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         ))]
     };
 
-    let detail_box = Paragraph::new(detail_lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .title(" Finding Details ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        );
-    frame.render_widget(detail_box, chunks[1]);
+    frame.render_widget(
+        inspector_panel(" Finding Details ", detail_lines, true),
+        chunks[1],
+    );
 }
 
 fn render_audit_tab(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -714,15 +757,18 @@ fn render_audit_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Min(8), Constraint::Length(7)])
         .split(area);
 
-    let filtered = app.filtered_audit_items();
-    let selected_item = app
-        .audit_table_state
-        .selected()
-        .and_then(|i| filtered.get(i).copied())
-        .cloned();
+    let snap = &app.snapshot;
+    let indices = &app.audit_indices;
+    let state = &mut app.audit_table_state;
 
-    let rows: Vec<Row> = filtered
+    let selected_item = state
+        .selected()
+        .and_then(|i| indices.get(i))
+        .and_then(|&idx| snap.audit_items.get(idx));
+
+    let rows: Vec<Row> = indices
         .iter()
+        .filter_map(|&idx| snap.audit_items.get(idx))
         .map(|item| {
             let col = audit_status_color(item.status);
             Row::new(vec![
@@ -741,7 +787,7 @@ fn render_audit_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let table = Table::new(
+    let table = styled_table(
         rows,
         [
             Constraint::Length(8),
@@ -750,31 +796,11 @@ fn render_audit_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(35),
             Constraint::Min(25),
         ],
-    )
-    .header(
-        Row::new(vec![
-            "STATUS",
-            "SUBSYSTEM",
-            "ITEM",
-            "LOCATION",
-            "VALUE / COMMAND",
-        ])
-        .style(Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD)),
-    )
-    .block(
-        Block::default()
-            .title(format!(" Audit ({}) ", filtered.len()))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(COL_ACCENT)),
-    )
-    .row_highlight_style(
-        Style::default()
-            .bg(COL_HIGHLIGHT_BG)
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("> ");
+        &["STATUS", "SUBSYSTEM", "ITEM", "LOCATION", "VALUE / COMMAND"],
+        format!(" Audit ({}) ", indices.len()),
+    );
 
-    frame.render_stateful_widget(table, chunks[0], &mut app.audit_table_state);
+    frame.render_stateful_widget(table, chunks[0], state);
 
     let inspector_lines = if let Some(item) = selected_item {
         let col = audit_status_color(item.status);
@@ -782,34 +808,36 @@ fn render_audit_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             Line::from(vec![
                 Span::styled(" Check    : ", Style::default().fg(COL_MUTED)),
                 Span::styled(
-                    format!("[{}] {} - {} ", item.status.label(), item.subsystem, item.name),
+                    format!(
+                        "[{}] {} - {} ",
+                        item.status.label(),
+                        item.subsystem,
+                        item.name
+                    ),
                     Style::default().fg(col).add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(" Location : ", Style::default().fg(COL_MUTED)),
-                Span::styled(item.location.clone(), Style::default().fg(COL_ACCENT)),
+                Span::styled(item.location.as_str(), Style::default().fg(COL_ACCENT)),
             ]),
             Line::from(vec![
                 Span::styled(" Value    : ", Style::default().fg(COL_MUTED)),
-                Span::styled(item.value.clone(), Style::default().fg(Color::White)),
+                Span::styled(item.value.as_str(), Style::default().fg(Color::White)),
             ]),
             Line::from(vec![
                 Span::styled(" Details  : ", Style::default().fg(COL_MUTED)),
-                Span::styled(item.details.clone(), Style::default().fg(COL_MED)),
+                Span::styled(item.details.as_str(), Style::default().fg(COL_MED)),
             ]),
         ]
     } else {
         vec![Line::from(" No audit item selected.")]
     };
 
-    let inspector = Paragraph::new(inspector_lines).block(
-        Block::default()
-            .title(" Audit Item Details ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+    frame.render_widget(
+        inspector_panel(" Audit Item Details ", inspector_lines, false),
+        chunks[1],
     );
-    frame.render_widget(inspector, chunks[1]);
 }
 
 fn render_processes_tab(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -818,15 +846,18 @@ fn render_processes_tab(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Min(8), Constraint::Length(7)])
         .split(area);
 
-    let filtered = app.filtered_processes();
-    let selected_proc = app
-        .proc_table_state
-        .selected()
-        .and_then(|i| filtered.get(i).copied())
-        .cloned();
+    let snap = &app.snapshot;
+    let indices = &app.proc_indices;
+    let state = &mut app.proc_table_state;
 
-    let rows: Vec<Row> = filtered
+    let selected_proc = state
+        .selected()
+        .and_then(|i| indices.get(i))
+        .and_then(|&idx| snap.processes.get(idx));
+
+    let rows: Vec<Row> = indices
         .iter()
+        .filter_map(|&idx| snap.processes.get(idx))
         .map(|p| {
             let col = severity_color(p.max_severity);
             let mem_mb = p.memory_bytes as f64 / (1024.0 * 1024.0);
@@ -859,16 +890,13 @@ fn render_processes_tab(frame: &mut Frame, app: &mut App, area: Rect) {
                     }),
                 )),
                 Cell::from(format!("{:.1} MB", mem_mb)),
-                Cell::from(Span::styled(
-                    hash_short.to_string(),
-                    Style::default().fg(COL_MED),
-                )),
+                Cell::from(Span::styled(hash_short, Style::default().fg(COL_MED))),
                 Cell::from(truncate_str(&p.exe_path, 46)),
             ])
         })
         .collect();
 
-    let table = Table::new(
+    let table = styled_table(
         rows,
         [
             Constraint::Length(9),
@@ -880,9 +908,7 @@ fn render_processes_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             Constraint::Length(14),
             Constraint::Min(25),
         ],
-    )
-    .header(
-        Row::new(vec![
+        &[
             "RISK",
             "PID",
             "PPID",
@@ -891,70 +917,184 @@ fn render_processes_tab(frame: &mut Frame, app: &mut App, area: Rect) {
             "MEMORY",
             "SHA-256 (12)",
             "EXECUTABLE PATH",
-        ])
-        .style(Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD)),
-    )
-    .block(
-        Block::default()
-            .title(format!(" Processes ({}) ", filtered.len()))
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(COL_ACCENT)),
-    )
-    .row_highlight_style(
-        Style::default()
-            .bg(COL_HIGHLIGHT_BG)
-            .add_modifier(Modifier::BOLD),
-    )
-    .highlight_symbol("> ");
+        ],
+        format!(" Processes ({}) ", indices.len()),
+    );
 
-    frame.render_stateful_widget(table, chunks[0], &mut app.proc_table_state);
+    frame.render_stateful_widget(table, chunks[0], state);
 
     let inspector_lines = if let Some(p) = selected_proc {
+        let mut sha_spans = vec![
+            Span::styled(" SHA-256  : ", Style::default().fg(COL_MUTED)),
+            Span::styled(
+                p.sha256.as_deref().unwrap_or("N/A"),
+                Style::default().fg(COL_MED),
+            ),
+        ];
+        if let Some(orig) = &p.original_filename {
+            sha_spans.push(Span::styled(
+                "  | PE OriginalFilename: ",
+                Style::default().fg(COL_MUTED),
+            ));
+            sha_spans.push(Span::styled(
+                orig.as_str(),
+                Style::default().fg(COL_LOW).add_modifier(Modifier::BOLD),
+            ));
+        }
         vec![
             Line::from(vec![
                 Span::styled(" Lineage  : ", Style::default().fg(COL_MUTED)),
                 Span::styled(p.lineage.join(" -> "), Style::default().fg(COL_ACCENT)),
-                Span::styled(format!("  | User: {}", p.user), Style::default().fg(Color::White)),
+                Span::styled(
+                    format!("  | User: {}", p.user),
+                    Style::default().fg(Color::White),
+                ),
             ]),
             Line::from(vec![
                 Span::styled(" Binary   : ", Style::default().fg(COL_MUTED)),
                 Span::styled(
                     if p.exe_path.is_empty() {
-                        "<Protected / Kernel Process>".to_string()
+                        "<Protected / Kernel Process>"
                     } else {
-                        p.exe_path.clone()
+                        p.exe_path.as_str()
                     },
                     Style::default().fg(Color::White),
                 ),
             ]),
-            Line::from(vec![
-                Span::styled(" SHA-256  : ", Style::default().fg(COL_MUTED)),
-                Span::styled(
-                    p.sha256
-                        .clone()
-                        .unwrap_or_else(|| "N/A".to_string()),
-                    Style::default().fg(COL_MED),
-                ),
-            ]),
+            Line::from(sha_spans),
             Line::from(vec![
                 Span::styled(" Cmdline  : ", Style::default().fg(COL_MUTED)),
-                Span::styled(truncate_str(&p.cmdline, 115), Style::default().fg(Color::Gray)),
+                Span::styled(
+                    truncate_str(&p.cmdline, 115),
+                    Style::default().fg(Color::Gray),
+                ),
             ]),
         ]
     } else {
         vec![Line::from(" No process selected.")]
     };
 
-    let inspector = Paragraph::new(inspector_lines).block(
-        Block::default()
-            .title(" Process Details ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray)),
+    frame.render_widget(
+        inspector_panel(" Process Details ", inspector_lines, false),
+        chunks[1],
     );
-    frame.render_widget(inspector, chunks[1]);
+}
+
+fn render_events_tab(frame: &mut Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Length(6)])
+        .split(area);
+
+    let snap = &app.snapshot;
+    let indices = &app.event_indices;
+    let state = &mut app.event_table_state;
+
+    let selected_ev = state
+        .selected()
+        .and_then(|i| indices.get(i))
+        .and_then(|&idx| snap.timeline_events.get(idx));
+
+    let rows: Vec<Row> = if indices.is_empty() {
+        vec![Row::new(vec![
+            Cell::from("-"),
+            Cell::from(Span::styled("IDLE", Style::default().fg(COL_SAFE))),
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("-"),
+            Cell::from("Flight recorder seeded. New/closed sockets, SHA-256 changes, and C2 beacons appear on next scan."),
+        ])]
+    } else {
+        indices
+            .iter()
+            .filter_map(|&idx| snap.timeline_events.get(idx))
+            .map(|ev| {
+                let sev_col = severity_color(ev.severity);
+                let kind_col = timeline_kind_color(ev.kind);
+                Row::new(vec![
+                    Cell::from(ev.timestamp.format("%H:%M:%S").to_string()),
+                    Cell::from(Span::styled(
+                        ev.kind.label(),
+                        Style::default().fg(kind_col).add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        ev.severity.label(),
+                        Style::default().fg(sev_col).add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(
+                        ev.pid
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                    ),
+                    Cell::from(Span::styled(
+                        truncate_str(&ev.process_name, 18),
+                        Style::default().fg(Color::White),
+                    )),
+                    Cell::from(truncate_str(&ev.summary, 68)),
+                ])
+            })
+            .collect()
+    };
+
+    let table = styled_table(
+        rows,
+        [
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(8),
+            Constraint::Length(20),
+            Constraint::Min(30),
+        ],
+        &["TIME", "EVENT", "SEVERITY", "PID", "PROCESS", "SUMMARY"],
+        format!(" Live Flight Recorder ({}) ", indices.len()),
+    );
+
+    frame.render_stateful_widget(table, chunks[0], state);
+
+    let inspector_lines = if let Some(ev) = selected_ev {
+        vec![
+            Line::from(vec![
+                Span::styled(" Event    : ", Style::default().fg(COL_MUTED)),
+                Span::styled(
+                    format!("{} [{}] ", ev.kind.label(), ev.severity.label()),
+                    Style::default()
+                        .fg(timeline_kind_color(ev.kind))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("@ {}", ev.timestamp.format("%Y-%m-%d %H:%M:%S")),
+                    Style::default().fg(COL_MUTED),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Endpoint : ", Style::default().fg(COL_MUTED)),
+                Span::styled(ev.endpoint.as_str(), Style::default().fg(COL_ACCENT)),
+                Span::styled(
+                    format!("  | Process: {} (PID {:?})", ev.process_name, ev.pid),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Summary  : ", Style::default().fg(COL_MUTED)),
+                Span::styled(ev.summary.as_str(), Style::default().fg(Color::White)),
+            ]),
+        ]
+    } else {
+        vec![Line::from(Span::styled(
+            " Waiting for socket or binary state transitions across scan intervals.",
+            Style::default().fg(COL_MUTED),
+        ))]
+    };
+
+    frame.render_widget(
+        inspector_panel(" Event Details ", inspector_lines, false),
+        chunks[1],
+    );
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let key_style = Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD);
     let top_line = if app.is_searching {
         Line::from(vec![
             Span::styled(
@@ -986,55 +1126,27 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         ])
     } else {
         Line::from(vec![
-            Span::styled(
-                " [1-5/Tab]",
-                Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(" [1-6/Tab]", key_style),
             Span::raw(" View  "),
-            Span::styled(
-                "[Up/Down]",
-                Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("[j/k]", key_style),
             Span::raw(" Select  "),
-            Span::styled(
-                "[f]",
-                Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("[f]", key_style),
             Span::raw(" Filter  "),
-            Span::styled(
-                "[s]",
-                Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("[s]", key_style),
             Span::raw(" Sort  "),
-            Span::styled(
-                "[/]",
-                Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("[/]", key_style),
             Span::raw(" Search  "),
-            Span::styled(
-                "[r]",
-                Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("[w]", key_style),
+            Span::raw(" Allowlist  "),
+            Span::styled("[r]", key_style),
             Span::raw(" Rescan  "),
-            Span::styled(
-                "[a]",
-                Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("[a]", key_style),
             Span::raw(" Refresh  "),
-            Span::styled(
-                "[e]",
-                Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("[e]", key_style),
             Span::raw(" Export  "),
-            Span::styled(
-                "[Enter]",
-                Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("[Enter]", key_style),
             Span::raw(" Details  "),
-            Span::styled(
-                "[?]",
-                Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
-            ),
+            Span::styled("[?]", key_style),
             Span::raw(" Help  "),
             Span::styled(
                 "[q]",
@@ -1048,14 +1160,19 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_detail_modal(frame: &mut Frame, app: &App) {
-    let area = centered_rect(78, 72, frame.area());
+    let area = centered_rect(78, 74, frame.area());
     frame.render_widget(Clear, area);
 
+    let snap = &app.snapshot;
     let mut lines: Vec<Line> = Vec::new();
     match app.active_tab {
         ActiveTab::Connections | ActiveTab::Overview => {
-            let filtered = app.filtered_connections();
-            if let Some(c) = app.conn_table_state.selected().and_then(|i| filtered.get(i)) {
+            if let Some(c) = app
+                .conn_table_state
+                .selected()
+                .and_then(|i| app.conn_indices.get(i))
+                .and_then(|&idx| snap.connections.get(idx))
+            {
                 lines.push(Line::from(Span::styled(
                     format!("Socket #{} - {} ({})", c.id, c.process_name, c.protocol.as_str()),
                     Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
@@ -1066,10 +1183,16 @@ fn render_detail_modal(frame: &mut Frame, app: &App) {
                 lines.push(Line::from(format!("Remote Endpoint : {}", c.remote_display())));
                 lines.push(Line::from(format!("Socket State    : {}", c.state)));
                 lines.push(Line::from(format!("Exposure Scope  : {}", c.exposure.label())));
-                lines.push(Line::from(format!("Remote Category : {}", c.remote_category.label())));
+                lines.push(Line::from(format!(
+                    "Remote Category : {}",
+                    c.remote_category.label()
+                )));
                 lines.push(Line::from(format!("Service Name    : {}", c.service_name)));
                 lines.push(Line::from(format!("Process ID      : {:?}", c.pid)));
-                lines.push(Line::from(format!("Process Lineage : {}", c.lineage.join(" -> "))));
+                lines.push(Line::from(format!(
+                    "Process Lineage : {}",
+                    c.lineage.join(" -> ")
+                )));
                 lines.push(Line::from(format!("Executable Path : {}", c.exe_path)));
                 lines.push(Line::from(format!(
                     "SHA-256 Digest  : {}",
@@ -1091,8 +1214,12 @@ fn render_detail_modal(frame: &mut Frame, app: &App) {
             }
         }
         ActiveTab::Findings => {
-            let filtered = app.filtered_findings();
-            if let Some(f) = app.finding_table_state.selected().and_then(|i| filtered.get(i)) {
+            if let Some(f) = app
+                .finding_table_state
+                .selected()
+                .and_then(|i| app.finding_indices.get(i))
+                .and_then(|&idx| snap.findings.get(idx))
+            {
                 lines.push(Line::from(Span::styled(
                     format!("[{}] {} ({})", f.severity.label(), f.title, f.rule_id),
                     Style::default()
@@ -1102,7 +1229,10 @@ fn render_detail_modal(frame: &mut Frame, app: &App) {
                 lines.push(Line::from(""));
                 lines.push(Line::from(format!("Category      : {}", f.category)));
                 lines.push(Line::from(format!("MITRE ID      : {}", f.mitre_id)));
-                lines.push(Line::from(format!("Process / PID : {:?} (PID {:?})", f.process_name, f.pid)));
+                lines.push(Line::from(format!(
+                    "Process / PID : {:?} (PID {:?})",
+                    f.process_name, f.pid
+                )));
                 lines.push(Line::from(format!("Endpoint      : {:?}", f.endpoint)));
                 lines.push(Line::from(""));
                 lines.push(Line::from(format!("Description   : {}", f.description)));
@@ -1113,8 +1243,12 @@ fn render_detail_modal(frame: &mut Frame, app: &App) {
             }
         }
         ActiveTab::Audit => {
-            let filtered = app.filtered_audit_items();
-            if let Some(a) = app.audit_table_state.selected().and_then(|i| filtered.get(i)) {
+            if let Some(a) = app
+                .audit_table_state
+                .selected()
+                .and_then(|i| app.audit_indices.get(i))
+                .and_then(|&idx| snap.audit_items.get(idx))
+            {
                 lines.push(Line::from(Span::styled(
                     format!("[{}] {} - {}", a.status.label(), a.subsystem, a.name),
                     Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
@@ -1128,25 +1262,69 @@ fn render_detail_modal(frame: &mut Frame, app: &App) {
             }
         }
         ActiveTab::Processes => {
-            let filtered = app.filtered_processes();
-            if let Some(p) = app.proc_table_state.selected().and_then(|i| filtered.get(i)) {
+            if let Some(p) = app
+                .proc_table_state
+                .selected()
+                .and_then(|i| app.proc_indices.get(i))
+                .and_then(|&idx| snap.processes.get(idx))
+            {
                 lines.push(Line::from(Span::styled(
                     format!("Process: {} (PID {})", p.name, p.pid),
                     Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
-                lines.push(Line::from(format!("Parent PID     : {:?}", p.ppid)));
-                lines.push(Line::from(format!("User           : {}", p.user)));
-                lines.push(Line::from(format!("Lineage Chain  : {}", p.lineage.join(" -> "))));
-                lines.push(Line::from(format!("Open Sockets   : {}", p.open_sockets_count)));
-                lines.push(Line::from(format!("Executable     : {}", p.exe_path)));
-                lines.push(Line::from(format!("Deleted Binary : {}", p.is_deleted_binary)));
+                lines.push(Line::from(format!("Parent PID          : {:?}", p.ppid)));
+                lines.push(Line::from(format!("User                : {}", p.user)));
                 lines.push(Line::from(format!(
-                    "SHA-256 Digest : {}",
+                    "Lineage Chain       : {}",
+                    p.lineage.join(" -> ")
+                )));
+                lines.push(Line::from(format!(
+                    "Open Sockets        : {}",
+                    p.open_sockets_count
+                )));
+                lines.push(Line::from(format!("Executable          : {}", p.exe_path)));
+                lines.push(Line::from(format!(
+                    "PE OriginalFilename : {}",
+                    p.original_filename.as_deref().unwrap_or("N/A")
+                )));
+                lines.push(Line::from(format!(
+                    "Deleted Binary      : {}",
+                    p.is_deleted_binary
+                )));
+                lines.push(Line::from(format!(
+                    "SHA-256 Digest      : {}",
                     p.sha256.as_deref().unwrap_or("N/A")
                 )));
                 lines.push(Line::from(""));
-                lines.push(Line::from(format!("Command Line   : {}", p.cmdline)));
+                lines.push(Line::from(format!("Command Line        : {}", p.cmdline)));
+            }
+        }
+        ActiveTab::Events => {
+            if let Some(ev) = app
+                .event_table_state
+                .selected()
+                .and_then(|i| app.event_indices.get(i))
+                .and_then(|&idx| snap.timeline_events.get(idx))
+            {
+                lines.push(Line::from(Span::styled(
+                    format!("{} [{}]", ev.kind.label(), ev.severity.label()),
+                    Style::default()
+                        .fg(timeline_kind_color(ev.kind))
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(format!(
+                    "Timestamp : {}",
+                    ev.timestamp.format("%Y-%m-%d %H:%M:%S %z")
+                )));
+                lines.push(Line::from(format!(
+                    "Process   : {} (PID {:?})",
+                    ev.process_name, ev.pid
+                )));
+                lines.push(Line::from(format!("Endpoint  : {}", ev.endpoint)));
+                lines.push(Line::from(""));
+                lines.push(Line::from(format!("Summary   : {}", ev.summary)));
             }
         }
     }
@@ -1169,7 +1347,7 @@ fn render_detail_modal(frame: &mut Frame, app: &App) {
 }
 
 fn render_help_modal(frame: &mut Frame) {
-    let area = centered_rect(74, 74, frame.area());
+    let area = centered_rect(76, 78, frame.area());
     frame.render_widget(Clear, area);
 
     let lines = vec![
@@ -1178,15 +1356,16 @@ fn render_help_modal(frame: &mut Frame) {
             Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("  [1] - [5] / [Tab]   Switch views (Overview, Connections, Findings, Audit, Processes)"),
+        Line::from("  [1] - [6] / [Tab]   Switch views (Overview, Connections, Findings, Audit, Processes, Events)"),
         Line::from("  [Up/Down] / [j/k]   Move selection up or down"),
         Line::from("  [PgUp / PgDn]       Move selection 10 rows"),
         Line::from("  [f]                 Cycle connection filter"),
         Line::from("  [s]                 Cycle connection sort order"),
         Line::from("  [/]                 Filter current table by text"),
+        Line::from("  [w]                 Allowlist selected binary by cryptographic SHA-256 digest"),
         Line::from("  [r]                 Run immediate scan"),
         Line::from("  [a]                 Cycle auto-refresh interval (3s / 10s / Paused)"),
-        Line::from("  [e]                 Export safe_door_report.json and safe_door_report.md"),
+        Line::from("  [e]                 Export safe_door_report.{json, md, sarif.json}"),
         Line::from("  [Enter] or [d]      Open detail view for selected row"),
         Line::from("  [q] or [Esc]        Close modal / Clear search / Quit"),
         Line::from(""),
@@ -1197,10 +1376,12 @@ fn render_help_modal(frame: &mut Frame) {
         Line::from("  - H01: Shells (sh, bash, cmd, powershell) or relays (nc, socat) bound to sockets"),
         Line::from("  - H02: Binaries executing from /tmp, /dev/shm, %TEMP%, or Users\\Public"),
         Line::from("  - H03: Processes executing from deleted binaries or memfd descriptors"),
-        Line::from("  - H04: System process path spoofing, typosquats, or fake kernel threads"),
+        Line::from("  - H04: System process path spoofing, typosquats, fake kthreads, or renamed PE LOLBins"),
         Line::from("  - H05: Known backdoor, C2, RAT, or mining ports (4444, 31337, 1337, 5555, 2375)"),
         Line::from("  - H06: Sensitive services bound to 0.0.0.0/:: and server-spawned shells"),
         Line::from("  - H07: Encoded PowerShell commands, download cradles, /dev/tcp, and LOLBins"),
+        Line::from("  - H08: Loopback (127.0.0.1) services transitively exposed via a network-reachable proxy"),
+        Line::from("  - H09: Periodic low-jitter outbound C2 beacon flows (Welford online CV <= 0.20)"),
         Line::from("  - AUD: Host firewall state, Registry Run/Winlogon, Cron, LD_PRELOAD, and hosts file"),
         Line::from(""),
         Line::from(Span::styled(
@@ -1246,12 +1427,13 @@ mod tests {
     use crate::scanner::ScannerEngine;
     use ratatui::{backend::TestBackend, Terminal};
 
-    const TABS: [ActiveTab; 5] = [
+    const TABS: [ActiveTab; 6] = [
         ActiveTab::Overview,
         ActiveTab::Connections,
         ActiveTab::Findings,
         ActiveTab::Audit,
         ActiveTab::Processes,
+        ActiveTab::Events,
     ];
 
     /// Draws every tab and both modals on real scan data, at a normal and two tiny sizes.
@@ -1278,16 +1460,19 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_brand_and_warning_badge() {
+    fn header_shows_brand_warning_and_allowlisted_badges() {
         let mut engine = ScannerEngine::new();
         let mut snapshot = engine.perform_scan();
         snapshot.scan_warnings = vec!["Socket enumeration failed: test".to_string()];
+        snapshot.suppressed_count = 3;
         let mut app = App::new(engine, snapshot);
 
-        let mut terminal = Terminal::new(TestBackend::new(200, 40)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(220, 40)).unwrap();
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let screen = terminal.backend().to_string();
         assert!(screen.contains("UNLATCHED"));
         assert!(screen.contains("INCOMPLETE: Socket enumeration failed"));
+        assert!(screen.contains("Allowlisted: 3"));
+        assert!(screen.contains("[6] Events"));
     }
 }

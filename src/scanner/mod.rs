@@ -1,13 +1,17 @@
 pub mod audit;
+pub mod fs_safe;
 pub mod heuristics;
+pub mod indicators;
 pub mod network;
 pub mod ports_db;
 pub mod process;
 
-use crate::models::{IpCategory, ProcessRecord, ScanSnapshot, Severity};
+use crate::models::{cmp_ci, ProcessRecord, ScanSnapshot};
 use chrono::Local;
 use network::{collect_network_connections, DnsCache};
-use process::{check_is_elevated, collect_processes, enrich_sha256_hashes, CachedHash};
+use process::{
+    check_is_elevated, collect_processes, enrich_pe_identities, enrich_sha256_hashes, CachedHash,
+};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use sysinfo::{System, Users};
@@ -24,64 +28,6 @@ pub(crate) fn system_root() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from(r"C:\Windows"))
 }
 
-/// 100 minus each finding's penalty, floored at 0, plus a letter grade.
-/// The score counts findings. It does not measure how secure the host is.
-fn score_and_grade(findings: &[crate::models::SecurityFinding], incomplete: bool) -> (u8, String) {
-    let penalty: u32 = findings.iter().map(|f| f.severity.penalty_points()).sum();
-    let score = 100u32.saturating_sub(penalty) as u8;
-    let grade = if incomplete {
-        "INCOMPLETE"
-    } else {
-        match score {
-            95..=100 => "A+",
-            85..=94 => "A",
-            75..=84 => "B",
-            60..=74 => "C",
-            40..=59 => "D",
-            _ => "F",
-        }
-    };
-    (score, grade.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::models::SecurityFinding;
-
-    fn finding(severity: Severity) -> SecurityFinding {
-        SecurityFinding {
-            rule_id: "T".to_string(),
-            category: String::new(),
-            mitre_id: String::new(),
-            severity,
-            title: String::new(),
-            description: String::new(),
-            pid: None,
-            process_name: None,
-            endpoint: None,
-            evidence: String::new(),
-            remediation: String::new(),
-        }
-    }
-
-    #[test]
-    fn score_subtracts_penalties_and_floors_at_zero() {
-        use Severity::*;
-        let grade = |sevs: &[Severity], incomplete| {
-            let fs: Vec<_> = sevs.iter().map(|&s| finding(s)).collect();
-            score_and_grade(&fs, incomplete)
-        };
-        assert_eq!(grade(&[], false), (100, "A+".to_string()));
-        assert_eq!(grade(&[Critical], false), (70, "C".to_string()));
-        // The stock Windows host in this session: one High (SMB) and one Medium (RPC).
-        assert_eq!(grade(&[High, Medium], false), (79, "B".to_string()));
-        assert_eq!(grade(&[Low, Safe], false), (98, "A+".to_string()));
-        assert_eq!(grade(&[Critical; 4], false), (0, "F".to_string()));
-        assert_eq!(grade(&[], true), (100, "INCOMPLETE".to_string()));
-    }
-}
-
 pub struct ScannerEngine {
     sys: System,
     users: Users,
@@ -92,6 +38,12 @@ pub struct ScannerEngine {
     os_version: String,
     kernel_version: String,
     is_elevated: bool,
+}
+
+impl Default for ScannerEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ScannerEngine {
@@ -123,9 +75,12 @@ impl ScannerEngine {
         let start = Instant::now();
 
         let mut proc_map = collect_processes(&mut self.sys, &self.users);
+        enrich_pe_identities(&mut proc_map, &mut self.hash_cache);
+
         let (mut connections, net_warning) =
             collect_network_connections(&mut proc_map, &self.dns_cache);
         let scan_warnings: Vec<String> = net_warning.into_iter().collect();
+
         let mut findings =
             heuristics::evaluate_security_heuristics(&mut connections, &mut proc_map);
 
@@ -158,41 +113,8 @@ impl ScannerEngine {
             b.max_severity
                 .cmp(&a.max_severity)
                 .then_with(|| b.open_sockets_count.cmp(&a.open_sockets_count))
-                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| cmp_ci(&a.name, &b.name))
         });
-
-        let sockets_without_exe = connections.iter().filter(|c| c.exe_path.is_empty()).count();
-        let total_connections = connections.len();
-        let listening_ports = connections.iter().filter(|c| c.is_listening()).count();
-        let established_connections = connections.iter().filter(|c| c.is_established()).count();
-        let external_connections = connections
-            .iter()
-            .filter(|c| c.remote_category == IpCategory::PublicInternet)
-            .count();
-        let suspicious_connections = connections
-            .iter()
-            .filter(|c| c.severity >= Severity::Medium)
-            .count();
-
-        let critical_count = findings
-            .iter()
-            .filter(|f| f.severity == Severity::Critical)
-            .count();
-        let high_count = findings
-            .iter()
-            .filter(|f| f.severity == Severity::High)
-            .count();
-        let medium_count = findings
-            .iter()
-            .filter(|f| f.severity == Severity::Medium)
-            .count();
-        let low_count = findings
-            .iter()
-            .filter(|f| f.severity == Severity::Low)
-            .count();
-
-        let (security_score, security_grade) =
-            score_and_grade(&findings, !scan_warnings.is_empty());
 
         let mut snapshot = ScanSnapshot {
             timestamp: Local::now(),
@@ -202,26 +124,65 @@ impl ScannerEngine {
             os_version: self.os_version.clone(),
             kernel_version: self.kernel_version.clone(),
             is_elevated: self.is_elevated,
-            security_score,
-            security_grade,
+            security_score: 100,
+            security_grade: String::new(),
             scan_warnings,
-            sockets_without_exe,
-            total_connections,
-            listening_ports,
-            established_connections,
-            external_connections,
-            suspicious_connections,
-            critical_count,
-            high_count,
-            medium_count,
-            low_count,
+            sockets_without_exe: 0,
+            suppressed_count: 0,
+            total_connections: 0,
+            listening_ports: 0,
+            established_connections: 0,
+            external_connections: 0,
+            suspicious_connections: 0,
+            critical_count: 0,
+            high_count: 0,
+            medium_count: 0,
+            low_count: 0,
             connections,
             findings,
             audit_items,
             processes,
+            timeline_events: Vec::new(),
         };
+        snapshot.recompute_summary();
         // After detection, which needs the raw text; before any output sees it.
         snapshot.neutralize_text();
         snapshot
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::{score_and_grade, SecurityFinding, Severity};
+
+    fn finding(severity: Severity) -> SecurityFinding {
+        SecurityFinding {
+            rule_id: "T".to_string(),
+            category: String::new(),
+            mitre_id: String::new(),
+            severity,
+            title: String::new(),
+            description: String::new(),
+            pid: None,
+            process_name: None,
+            endpoint: None,
+            evidence: String::new(),
+            remediation: String::new(),
+        }
+    }
+
+    #[test]
+    fn score_subtracts_penalties_and_floors_at_zero() {
+        use Severity::*;
+        let grade = |sevs: &[Severity], incomplete| {
+            let fs: Vec<_> = sevs.iter().map(|&s| finding(s)).collect();
+            score_and_grade(&fs, incomplete)
+        };
+        assert_eq!(grade(&[], false), (100, "A+".to_string()));
+        assert_eq!(grade(&[Critical], false), (70, "C".to_string()));
+        assert_eq!(grade(&[High, Medium], false), (79, "B".to_string()));
+        assert_eq!(grade(&[Low, Safe], false), (98, "A+".to_string()));
+        assert_eq!(grade(&[Critical; 4], false), (0, "F".to_string()));
+        assert_eq!(grade(&[], true), (100, "INCOMPLETE".to_string()));
     }
 }

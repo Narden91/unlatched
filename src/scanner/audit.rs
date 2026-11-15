@@ -1,6 +1,10 @@
 use crate::models::{AuditItem, AuditStatus, SecurityFinding, Severity};
-use std::fs;
+use crate::scanner::fs_safe::{is_local_safe_path, read_bounded_string};
+use crate::scanner::indicators::{check_suspicious_exec_path, has_script_token};
 use std::path::Path;
+
+const MAX_AUDIT_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_HOSTS_BLOCKLIST_ITEMS: usize = 5;
 
 pub fn run_host_security_audit(
     is_elevated: bool,
@@ -56,6 +60,14 @@ pub fn run_host_security_audit(
     items
 }
 
+fn has_command_word(lower: &str, word: &str) -> bool {
+    lower.split_whitespace().any(|tok| {
+        let clean = tok.trim_matches(|c| c == '"' || c == '\'');
+        let bin = clean.rsplit(['/', '\\']).next().unwrap_or(clean);
+        bin == word || bin.strip_suffix(".exe") == Some(word)
+    })
+}
+
 fn evaluate_persistence_command(cmd: &str) -> (AuditStatus, String) {
     let lower = cmd.to_lowercase();
     let norm_path = lower.replace('/', "\\");
@@ -73,6 +85,20 @@ fn evaluate_persistence_command(cmd: &str) -> (AuditStatus, String) {
         );
     }
 
+    // Benign Linux /tmp cleanup cron commands (`find /tmp ... -delete`, `rm -f /tmp/...`).
+    if !is_chained
+        && (has_command_word(&lower, "find") || has_command_word(&lower, "tmpwatch"))
+        && (lower.contains("-delete") || lower.contains("/tmp"))
+    {
+        let first_word = lower.split_whitespace().next().unwrap_or("");
+        if first_word.ends_with("find") || first_word.ends_with("tmpwatch") {
+            return (
+                AuditStatus::Info,
+                "Scheduled temporary directory cleanup task".to_string(),
+            );
+        }
+    }
+
     let critical_cmd_patterns = [
         ("powershell", "Startup item launches PowerShell interpreter"),
         ("pwsh", "Startup item launches PowerShell Core interpreter"),
@@ -80,6 +106,8 @@ fn evaluate_persistence_command(cmd: &str) -> (AuditStatus, String) {
         ("regsvr32", "Startup item uses regsvr32.exe LOLBin"),
         ("wscript", "Startup item launches Windows Script Host (wscript)"),
         ("cscript", "Startup item launches Windows Script Host (cscript)"),
+        ("certutil", "Startup item invokes certutil.exe LOLBin"),
+        ("bitsadmin", "Startup item invokes bitsadmin.exe downloader"),
         ("/tmp/", "Persistence entry executes from /tmp"),
         ("/var/tmp/", "Persistence entry executes from /var/tmp"),
         ("/dev/shm/", "Persistence entry executes from /dev/shm"),
@@ -93,16 +121,23 @@ fn evaluate_persistence_command(cmd: &str) -> (AuditStatus, String) {
         }
     }
 
-    let critical_win_paths = [
-        ("\\appdata\\local\\temp\\", "Startup binary executes from Temp folder"),
-        ("\\windows\\temp\\", "Startup binary executes from Windows Temp folder"),
-        ("\\users\\public\\", "Startup binary executes from Users\\Public"),
-    ];
+    if has_command_word(&lower, "curl")
+        || has_command_word(&lower, "wget")
+        || has_command_word(&lower, "nc")
+        || has_command_word(&lower, "ncat")
+        || has_command_word(&lower, "socat")
+    {
+        return (
+            AuditStatus::Critical,
+            "Persistence entry invokes network transfer or socket relay utility".to_string(),
+        );
+    }
 
-    for (pat, reason) in critical_win_paths {
-        if norm_path.contains(pat) {
-            return (AuditStatus::Critical, reason.to_string());
-        }
+    if let Some(reason) = check_suspicious_exec_path(cmd, &norm_path) {
+        return (
+            AuditStatus::Critical,
+            format!("Startup binary executes from suspicious path: {}", reason),
+        );
     }
 
     if (lower.contains("cmd.exe") || lower.starts_with("cmd ")) && lower.contains(" /c ") {
@@ -112,19 +147,36 @@ fn evaluate_persistence_command(cmd: &str) -> (AuditStatus, String) {
         );
     }
 
-    let warning_patterns = [
+    if (has_command_word(&lower, "bash") || has_command_word(&lower, "sh"))
+        && lower.contains(" -c ")
+    {
+        return (
+            AuditStatus::Warning,
+            "Persistence entry executes inline sh/bash -c command".to_string(),
+        );
+    }
+
+    let warning_scripts = [
         (".vbs", "Startup item executes a VBScript (.vbs)"),
         (".js", "Startup item executes a JScript (.js) file"),
         (".hta", "Startup item executes an HTML Application (.hta)"),
         (".bat", "Startup item executes a Batch script (.bat)"),
+        (".cmd", "Startup item executes a Command script (.cmd)"),
         (".ps1", "Startup item executes a PowerShell script (.ps1)"),
-        ("rundll32", "Startup item invokes rundll32.exe DLL loader"),
+        (".scr", "Startup item executes a Screensaver PE (.scr)"),
     ];
 
-    for (pat, reason) in warning_patterns {
-        if lower.contains(pat) {
+    for (ext, reason) in warning_scripts {
+        if has_script_token(&lower, ext) {
             return (AuditStatus::Warning, reason.to_string());
         }
+    }
+
+    if lower.contains("rundll32") {
+        return (
+            AuditStatus::Warning,
+            "Startup item invokes rundll32.exe DLL loader".to_string(),
+        );
     }
 
     (
@@ -164,7 +216,6 @@ fn audit_windows_firewall(items: &mut Vec<AuditItem>, findings: &mut Vec<Securit
         );
         if let Ok(key) = hklm.open_subkey(&path) {
             let local: u32 = key.get_value("EnableFirewall").unwrap_or(1);
-            // Group Policy overrides the local setting, so it decides the effective state.
             let policy: Option<u32> = hklm
                 .open_subkey(format!(
                     "SOFTWARE\\Policies\\Microsoft\\WindowsFirewall\\{}",
@@ -191,7 +242,8 @@ fn audit_windows_firewall(items: &mut Vec<AuditItem>, findings: &mut Vec<Securit
                     location: format!("HKLM\\{}", path),
                     value: "DISABLED".to_string(),
                     status: disabled_status,
-                    details: "Windows Defender Firewall is turned OFF for this profile.".to_string(),
+                    details: "Windows Defender Firewall is turned OFF for this profile."
+                        .to_string(),
                 });
 
                 findings.push(SecurityFinding {
@@ -328,7 +380,58 @@ fn audit_windows_registry_persistence(
                 details: "Primary desktop shell launched at user logon.".to_string(),
             });
         }
+
+        if let Ok(userinit) = wl_key.get_value::<String, _>("Userinit") {
+            let status = if is_default_winlogon_userinit(&userinit) {
+                AuditStatus::Pass
+            } else {
+                AuditStatus::Critical
+            };
+            if status == AuditStatus::Critical {
+                findings.push(SecurityFinding {
+                    rule_id: "AUD-WINLOGON-USERINIT".to_string(),
+                    category: "Winlogon Persistence".to_string(),
+                    mitre_id: "T1547.004".to_string(),
+                    severity: Severity::Critical,
+                    title: "Modified Winlogon Userinit Registry Value".to_string(),
+                    description: format!(
+                        "HKLM\\{}\\Userinit contains additional or modified logon command: '{}'.",
+                        winlogon_path, userinit
+                    ),
+                    pid: None,
+                    process_name: None,
+                    endpoint: None,
+                    evidence: format!("Userinit = {}", userinit),
+                    remediation:
+                        "Restore Winlogon Userinit to C:\\Windows\\system32\\userinit.exe,."
+                            .to_string(),
+                });
+            }
+            items.push(AuditItem {
+                check_id: "AUD-WINLOGON-02".to_string(),
+                subsystem: "Winlogon Helper".to_string(),
+                name: "Winlogon Userinit".to_string(),
+                location: format!("HKLM\\{}", winlogon_path),
+                value: userinit,
+                status,
+                details: "Logon initialization helper invoked by winlogon.exe.".to_string(),
+            });
+        }
     }
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn is_default_winlogon_userinit(raw: &str) -> bool {
+    let entries: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if entries.len() != 1 {
+        return false;
+    }
+    let single = entries[0].trim_matches('"').to_lowercase().replace('/', "\\");
+    single == "userinit.exe" || single.ends_with(r"\windows\system32\userinit.exe")
 }
 
 #[cfg(windows)]
@@ -336,32 +439,53 @@ fn audit_windows_startup_folders(
     items: &mut Vec<AuditItem>,
     findings: &mut Vec<SecurityFinding>,
 ) {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use winreg::RegKey;
+
+    // Read Startup paths from Registry Shell Folders rather than trusting user-mutable %APPDATA%
+    // environment variables (preventing UNC path injection during elevated runs).
     let mut folders = Vec::new();
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        folders.push((
-            "User Startup Folder",
-            format!("{}\\Microsoft\\Windows\\Start Menu\\Programs\\Startup", appdata),
-        ));
+    if let Ok(hkcu_sf) = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders")
+    {
+        if let Ok(user_startup) = hkcu_sf.get_value::<String, _>("Startup") {
+            folders.push(("User Startup Folder", user_startup));
+        }
     }
-    if let Ok(progdata) = std::env::var("PROGRAMDATA") {
-        folders.push((
-            "Common Startup Folder",
-            format!(
-                "{}\\Microsoft\\Windows\\Start Menu\\Programs\\Startup",
-                progdata
-            ),
-        ));
+    if let Ok(hklm_sf) = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders")
+    {
+        if let Ok(common_startup) = hklm_sf.get_value::<String, _>("Common Startup") {
+            folders.push(("Common Startup Folder", common_startup));
+        }
     }
 
     for (label, folder_path) in folders {
-        if let Ok(entries) = fs::read_dir(&folder_path) {
+        let dir_path = Path::new(&folder_path);
+        if !is_local_safe_path(dir_path) {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(dir_path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.file_type().is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir_path) {
             for entry in entries.flatten() {
                 let file_name = entry.file_name().to_string_lossy().into_owned();
                 if file_name.eq_ignore_ascii_case("desktop.ini") {
                     continue;
                 }
                 let full_path = entry.path().to_string_lossy().into_owned();
-                let (status, details) = evaluate_persistence_command(&full_path);
+                let (mut status, mut details) = evaluate_persistence_command(&full_path);
+                let name_lower = file_name.to_lowercase();
+                if status == AuditStatus::Pass
+                    && (name_lower.ends_with(".exe") || name_lower.ends_with(".lnk"))
+                {
+                    status = AuditStatus::Info;
+                    details = "Executable or shortcut placed in Startup folder.".to_string();
+                }
 
                 if matches!(status, AuditStatus::Critical | AuditStatus::Warning) {
                     findings.push(SecurityFinding {
@@ -375,7 +499,9 @@ fn audit_windows_startup_folders(
                         process_name: Some(file_name.clone()),
                         endpoint: None,
                         evidence: full_path.clone(),
-                        remediation: "Remove unauthorized scripts or executables from the Startup folder.".to_string(),
+                        remediation:
+                            "Remove unauthorized scripts or executables from the Startup folder."
+                                .to_string(),
                     });
                 }
 
@@ -395,7 +521,8 @@ fn audit_windows_startup_folders(
 
 #[cfg(target_os = "linux")]
 fn audit_linux_firewall(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityFinding>) {
-    let ufw_conf = fs::read_to_string("/etc/ufw/ufw.conf").unwrap_or_default();
+    let ufw_conf =
+        read_bounded_string(Path::new("/etc/ufw/ufw.conf"), MAX_AUDIT_FILE_BYTES).unwrap_or_default();
     let nft_loaded = Path::new("/sys/module/nf_tables").exists();
     let ipt_loaded = Path::new("/proc/net/ip_tables_names").exists();
 
@@ -450,7 +577,7 @@ fn audit_linux_firewall(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityF
 #[cfg(target_os = "linux")]
 fn audit_linux_ld_preload(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityFinding>) {
     let preload_path = "/etc/ld.so.preload";
-    if let Ok(content) = fs::read_to_string(preload_path) {
+    if let Ok(content) = read_bounded_string(Path::new(preload_path), MAX_AUDIT_FILE_BYTES) {
         let active_lines: Vec<&str> = content
             .lines()
             .map(str::trim)
@@ -482,7 +609,9 @@ fn audit_linux_ld_preload(items: &mut Vec<AuditItem>, findings: &mut Vec<Securit
                 process_name: None,
                 endpoint: None,
                 evidence: format!("/etc/ld.so.preload: {}", joined),
-                remediation: "Inspect the preloaded .so library and clear /etc/ld.so.preload if unauthorized.".to_string(),
+                remediation:
+                    "Inspect the preloaded .so library and clear /etc/ld.so.preload if unauthorized."
+                        .to_string(),
             });
             return;
         }
@@ -501,53 +630,71 @@ fn audit_linux_ld_preload(items: &mut Vec<AuditItem>, findings: &mut Vec<Securit
 
 #[cfg(target_os = "linux")]
 fn audit_linux_cron_and_rc(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityFinding>) {
-    let files_to_check = ["/etc/crontab", "/etc/rc.local"];
-    for file_path in files_to_check {
-        if let Ok(content) = fs::read_to_string(file_path) {
-            for (idx, line) in content.lines().enumerate() {
-                let trimmed = line.trim();
-                if trimmed.is_empty()
-                    || trimmed.starts_with('#')
-                    || trimmed.starts_with("SHELL=")
-                    || trimmed.starts_with("PATH=")
-                    || trimmed.starts_with("exit 0")
-                {
-                    continue;
-                }
-                let (status, details) = evaluate_persistence_command(trimmed);
-                if matches!(status, AuditStatus::Critical | AuditStatus::Warning) {
-                    findings.push(SecurityFinding {
-                        rule_id: "AUD-LIN-CRON".to_string(),
-                        category: "Cron / Boot Persistence".to_string(),
-                        mitre_id: "T1053.003".to_string(),
-                        severity: status.to_severity(),
-                        title: format!("Suspicious Entry in {}", file_path),
-                        description: details.clone(),
-                        pid: None,
-                        process_name: None,
-                        endpoint: None,
-                        evidence: format!("{}:{} -> {}", file_path, idx + 1, trimmed),
-                        remediation: "Remove unauthorized scheduled commands from crontab/rc.local.".to_string(),
-                    });
-                }
-                items.push(AuditItem {
-                    check_id: "AUD-LIN-SCHED".to_string(),
-                    subsystem: "Cron / Boot Script".to_string(),
-                    name: format!("Line {}", idx + 1),
-                    location: file_path.to_string(),
-                    value: trimmed.to_string(),
-                    status,
-                    details,
-                });
-            }
+    let mut files_to_check = vec!["/etc/crontab".to_string(), "/etc/rc.local".to_string()];
+    if let Ok(entries) = std::fs::read_dir("/etc/cron.d") {
+        for entry in entries.flatten() {
+            files_to_check.push(entry.path().to_string_lossy().into_owned());
         }
+    }
+
+    for file_path in files_to_check {
+        if let Ok(content) = read_bounded_string(Path::new(&file_path), MAX_AUDIT_FILE_BYTES) {
+            parse_cron_or_rc_content(&file_path, &content, items, findings);
+        }
+    }
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_cron_or_rc_content(
+    file_path: &str,
+    content: &str,
+    items: &mut Vec<AuditItem>,
+    findings: &mut Vec<SecurityFinding>,
+) {
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("SHELL=")
+            || trimmed.starts_with("PATH=")
+            || trimmed.starts_with("MAILTO=")
+            || trimmed.starts_with("exit 0")
+        {
+            continue;
+        }
+        let (status, details) = evaluate_persistence_command(trimmed);
+        if matches!(status, AuditStatus::Critical | AuditStatus::Warning) {
+            findings.push(SecurityFinding {
+                rule_id: "AUD-LIN-CRON".to_string(),
+                category: "Cron / Boot Persistence".to_string(),
+                mitre_id: "T1053.003".to_string(),
+                severity: status.to_severity(),
+                title: format!("Suspicious Entry in {}", file_path),
+                description: details.clone(),
+                pid: None,
+                process_name: None,
+                endpoint: None,
+                evidence: format!("{}:{} -> {}", file_path, idx + 1, trimmed),
+                remediation: "Remove unauthorized scheduled commands from crontab/rc.local."
+                    .to_string(),
+            });
+        }
+        items.push(AuditItem {
+            check_id: "AUD-LIN-SCHED".to_string(),
+            subsystem: "Cron / Boot Script".to_string(),
+            name: format!("Line {}", idx + 1),
+            location: file_path.to_string(),
+            value: trimmed.to_string(),
+            status,
+            details,
+        });
     }
 }
 
 #[cfg(target_os = "linux")]
 fn audit_linux_sshd_config(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityFinding>) {
     let sshd_path = "/etc/ssh/sshd_config";
-    if let Ok(content) = fs::read_to_string(sshd_path) {
+    if let Ok(content) = read_bounded_string(Path::new(sshd_path), MAX_AUDIT_FILE_BYTES) {
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -564,13 +711,13 @@ fn audit_linux_sshd_config(items: &mut Vec<AuditItem>, findings: &mut Vec<Securi
 #[cfg(target_os = "linux")]
 fn audit_linux_systemd_units(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityFinding>) {
     let dir = "/etc/systemd/system";
-    if let Ok(entries) = fs::read_dir(dir) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("service") {
                 continue;
             }
-            if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(content) = read_bounded_string(&path, MAX_AUDIT_FILE_BYTES) {
                 for line in content.lines() {
                     if let Some(exec) = line.trim().strip_prefix("ExecStart=") {
                         let (status, details) = evaluate_persistence_command(exec);
@@ -587,7 +734,8 @@ fn audit_linux_systemd_units(items: &mut Vec<AuditItem>, findings: &mut Vec<Secu
                                 process_name: Some(unit_name.clone()),
                                 endpoint: None,
                                 evidence: format!("{} -> ExecStart={}", path.display(), exec),
-                                remediation: "Disable and inspect the systemd service file.".to_string(),
+                                remediation: "Disable and inspect the systemd service file."
+                                    .to_string(),
                             });
                             items.push(AuditItem {
                                 check_id: "AUD-SYSTEMD".to_string(),
@@ -612,14 +760,18 @@ fn check_sshd_directive(
     path: &str,
     trimmed: &str,
 ) -> Option<(AuditItem, Option<SecurityFinding>)> {
-    let lower = trimmed.to_lowercase();
-    if lower.starts_with("permitrootlogin") && lower.contains("yes") {
+    let uncommented = trimmed.split('#').next().unwrap_or("").trim();
+    let mut parts = uncommented.split_whitespace();
+    let directive = parts.next()?;
+    let value = parts.next()?;
+
+    if directive.eq_ignore_ascii_case("permitrootlogin") && value.eq_ignore_ascii_case("yes") {
         let item = AuditItem {
             check_id: "AUD-SSH-ROOT".to_string(),
             subsystem: "SSH Hardening".to_string(),
             name: "PermitRootLogin".to_string(),
             location: path.to_string(),
-            value: trimmed.to_string(),
+            value: uncommented.to_string(),
             status: AuditStatus::Warning,
             details: "Direct SSH root login is enabled.".to_string(),
         };
@@ -633,7 +785,7 @@ fn check_sshd_directive(
             pid: None,
             process_name: Some("sshd".to_string()),
             endpoint: None,
-            evidence: trimmed.to_string(),
+            evidence: uncommented.to_string(),
             remediation: format!(
                 "Set 'PermitRootLogin prohibit-password' or 'no' in {}.",
                 path
@@ -641,17 +793,17 @@ fn check_sshd_directive(
         };
         return Some((item, Some(finding)));
     }
-    if lower.starts_with("permitemptypasswords") && lower.contains("yes") {
+    if directive.eq_ignore_ascii_case("permitemptypasswords") && value.eq_ignore_ascii_case("yes")
+    {
         let item = AuditItem {
             check_id: "AUD-SSH-EMPTY".to_string(),
             subsystem: "SSH Hardening".to_string(),
             name: "PermitEmptyPasswords".to_string(),
             location: path.to_string(),
-            value: trimmed.to_string(),
+            value: uncommented.to_string(),
             status: AuditStatus::Critical,
             details: "SSH allows login for accounts with empty passwords.".to_string(),
         };
-        // The audit row alone did not change the score or the exit code, so add a finding.
         let finding = SecurityFinding {
             rule_id: "AUD-SSH-EMPTY".to_string(),
             category: "SSH Configuration".to_string(),
@@ -662,7 +814,7 @@ fn check_sshd_directive(
             pid: None,
             process_name: Some("sshd".to_string()),
             endpoint: None,
-            evidence: trimmed.to_string(),
+            evidence: uncommented.to_string(),
             remediation: format!("Set 'PermitEmptyPasswords no' in {}.", path),
         };
         return Some((item, Some(finding)));
@@ -696,14 +848,19 @@ fn audit_hosts_file(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityFindi
     #[cfg(not(windows))]
     let hosts_path = "/etc/hosts".to_string();
 
-    if !Path::new(&hosts_path).exists() {
-        return;
-    }
-
-    let Ok(content) = fs::read_to_string(&hosts_path) else {
+    let Ok(content) = read_bounded_string(Path::new(&hosts_path), MAX_AUDIT_FILE_BYTES) else {
         return;
     };
 
+    parse_hosts_content(&hosts_path, &content, items, findings);
+}
+
+fn parse_hosts_content(
+    hosts_path: &str,
+    content: &str,
+    items: &mut Vec<AuditItem>,
+    findings: &mut Vec<SecurityFinding>,
+) {
     let sensitive_domains = [
         "windowsupdate.com",
         "microsoft.com",
@@ -718,6 +875,9 @@ fn audit_hosts_file(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityFindi
     ];
 
     let mut custom_mappings = 0usize;
+    let mut sinkholed_domains: Vec<String> = Vec::new();
+    let mut sinkhole_sample_line = String::new();
+
     for line in content.lines() {
         let trimmed = line.split('#').next().unwrap_or("").trim();
         if trimmed.is_empty() {
@@ -749,32 +909,90 @@ fn audit_hosts_file(items: &mut Vec<AuditItem>, findings: &mut Vec<SecurityFindi
 
         if sensitive_domains.iter().any(|&sd| domain_lower.contains(sd)) {
             let (status, severity, details) = hosts_override_level(ip);
-            items.push(AuditItem {
-                check_id: "AUD-HOSTS-HIJACK".to_string(),
-                subsystem: "DNS / Hosts File".to_string(),
-                name: format!("Hijacked Domain ({})", domain_list),
-                location: hosts_path.to_string(),
-                value: format!("{} -> {}", domain_list, ip),
-                status,
-                details: details.to_string(),
-            });
-            findings.push(SecurityFinding {
-                rule_id: "AUD-HOSTS-TAMPER".to_string(),
-                category: "Hosts File Tampering".to_string(),
-                mitre_id: "T1565.001".to_string(),
-                severity,
-                title: format!("Hosts File Redirects Security/Update Domain: {}", domain_list),
-                description: format!(
-                    "{} maps '{}' to '{}'.",
-                    hosts_path, domain_list, ip
-                ),
-                pid: None,
-                process_name: None,
-                endpoint: None,
-                evidence: trimmed.to_string(),
-                remediation: format!("Remove the redirection entry from {}.", hosts_path),
-            });
+            if severity == Severity::Critical {
+                items.push(AuditItem {
+                    check_id: "AUD-HOSTS-HIJACK".to_string(),
+                    subsystem: "DNS / Hosts File".to_string(),
+                    name: format!("Hijacked Domain ({})", domain_list),
+                    location: hosts_path.to_string(),
+                    value: format!("{} -> {}", domain_list, ip),
+                    status,
+                    details: details.to_string(),
+                });
+                findings.push(SecurityFinding {
+                    rule_id: "AUD-HOSTS-TAMPER".to_string(),
+                    category: "Hosts File Tampering".to_string(),
+                    mitre_id: "T1565.001".to_string(),
+                    severity,
+                    title: format!("Hosts File Redirects Security/Update Domain: {}", domain_list),
+                    description: format!("{} maps '{}' to '{}'.", hosts_path, domain_list, ip),
+                    pid: None,
+                    process_name: None,
+                    endpoint: None,
+                    evidence: trimmed.to_string(),
+                    remediation: format!("Remove the redirection entry from {}.", hosts_path),
+                });
+            } else {
+                if sinkholed_domains.len() < MAX_HOSTS_BLOCKLIST_ITEMS {
+                    items.push(AuditItem {
+                        check_id: "AUD-HOSTS-HIJACK".to_string(),
+                        subsystem: "DNS / Hosts File".to_string(),
+                        name: format!("Blocked Domain ({})", domain_list),
+                        location: hosts_path.to_string(),
+                        value: format!("{} -> {}", domain_list, ip),
+                        status,
+                        details: details.to_string(),
+                    });
+                }
+                if sinkhole_sample_line.is_empty() {
+                    sinkhole_sample_line = trimmed.to_string();
+                }
+                sinkholed_domains.push(domain_list);
+            }
         }
+    }
+
+    // Aggregate sinkhole/blocklist matches into a single Medium finding so ad-blockers with dozens
+    // of telemetry entries do not multiply score penalties while still surfacing tampering.
+    if !sinkholed_domains.is_empty() {
+        let (_, severity, _) = hosts_override_level("0.0.0.0");
+        let preview: Vec<&str> = sinkholed_domains
+            .iter()
+            .take(3)
+            .map(String::as_str)
+            .collect();
+        let summary_domains = if sinkholed_domains.len() > 3 {
+            format!(
+                "{} (+{} more)",
+                preview.join(", "),
+                sinkholed_domains.len() - 3
+            )
+        } else {
+            preview.join(", ")
+        };
+        findings.push(SecurityFinding {
+            rule_id: "AUD-HOSTS-TAMPER".to_string(),
+            category: "Hosts File Tampering".to_string(),
+            mitre_id: "T1565.001".to_string(),
+            severity,
+            title: format!(
+                "Hosts File Blocks Security/Update Domain(s): {}",
+                summary_domains
+            ),
+            description: format!(
+                "{} maps {} security/OS domain entry(ies) to loopback/0.0.0.0 (blocklist or AV tampering).",
+                hosts_path,
+                sinkholed_domains.len()
+            ),
+            pid: None,
+            process_name: None,
+            endpoint: None,
+            evidence: sinkhole_sample_line,
+            remediation: format!(
+                "Verify whether these sinkhole rules in {} come from an intentional blocklist.",
+                hosts_path
+            ),
+        });
     }
 
     items.push(AuditItem {
@@ -812,7 +1030,8 @@ mod tests {
         );
         assert_eq!(st3b, AuditStatus::Critical);
 
-        let (st4, _) = evaluate_persistence_command(r#"C:\Windows\system32\cmd.exe /q /c echo hello"#);
+        let (st4, _) =
+            evaluate_persistence_command(r#"C:\Windows\system32\cmd.exe /q /c echo hello"#);
         assert_eq!(st4, AuditStatus::Warning);
 
         let (st5, _) = evaluate_persistence_command(
@@ -825,22 +1044,68 @@ mod tests {
             r#"cmd.exe /c del x.tmp & powershell -w hidden -enc ZQBjAGgAbwA="#,
         );
         assert_eq!(st6, AuditStatus::Critical);
+
+        // `.json` argument must NOT false-positive on the `.js` JScript rule.
+        let (st7, _) = evaluate_persistence_command(
+            r#""C:\Program Files\Daemon\service.exe" --config "C:\ProgramData\Daemon\config.json""#,
+        );
+        assert_eq!(st7, AuditStatus::Pass);
+
+        // Benign Linux `/tmp` cleanup job must NOT trigger Critical `/tmp/` execution alert.
+        let (st8, _) =
+            evaluate_persistence_command("/usr/bin/find /tmp/ -type f -mtime +7 -delete");
+        assert_eq!(st8, AuditStatus::Info);
     }
 
     #[test]
-    fn test_sshd_empty_passwords_creates_finding() {
+    fn test_sshd_empty_passwords_and_inline_comments() {
         let (item, finding) =
             check_sshd_directive("/etc/ssh/sshd_config", "PermitEmptyPasswords yes").unwrap();
         assert_eq!(item.status, AuditStatus::Critical);
         assert_eq!(finding.unwrap().severity, Severity::Critical);
         assert!(check_sshd_directive("/etc/ssh/sshd_config", "PermitEmptyPasswords no").is_none());
-        assert!(check_sshd_directive("/etc/ssh/sshd_config", "PermitRootLogin yes").is_some());
+        assert!(
+            check_sshd_directive("/etc/ssh/sshd_config", "PermitRootLogin no # never set yes")
+                .is_none(),
+            "inline comment containing 'yes' must not trigger PermitRootLogin"
+        );
+        assert!(check_sshd_directive("/etc/ssh/sshd_config", "PermitRootLogin yes # admin").is_some());
     }
 
     #[test]
-    fn test_hosts_blocklist_is_not_critical() {
+    fn test_hosts_blocklist_aggregates_while_redirect_stays_critical() {
         assert_eq!(hosts_override_level("0.0.0.0").0, AuditStatus::Warning);
         assert_eq!(hosts_override_level("127.0.0.1").1, Severity::Medium);
         assert_eq!(hosts_override_level("203.0.113.5").0, AuditStatus::Critical);
+
+        let sample = "\
+            0.0.0.0 telemetry.microsoft.com\n\
+            0.0.0.0 watson.microsoft.com\n\
+            0.0.0.0 vortex.data.microsoft.com\n\
+            198.51.100.77 www.virustotal.com\n";
+        let mut items = Vec::new();
+        let mut findings = Vec::new();
+        parse_hosts_content("/etc/hosts", sample, &mut items, &mut findings);
+        let crit = findings
+            .iter()
+            .filter(|f| f.severity == Severity::Critical)
+            .count();
+        let med = findings
+            .iter()
+            .filter(|f| f.severity == Severity::Medium)
+            .count();
+        assert_eq!(crit, 1, "redirect to external IP is Critical");
+        assert_eq!(med, 1, "multiple 0.0.0.0 blocklist lines aggregate to 1 Medium finding");
+    }
+
+    #[test]
+    fn test_winlogon_userinit_validation() {
+        assert!(is_default_winlogon_userinit(
+            r"C:\Windows\system32\userinit.exe,"
+        ));
+        assert!(is_default_winlogon_userinit("userinit.exe"));
+        assert!(!is_default_winlogon_userinit(
+            r"C:\Windows\system32\userinit.exe,C:\Temp\evil.exe"
+        ));
     }
 }

@@ -1,7 +1,9 @@
 use crate::models::{ProcessRecord, Severity};
+use crate::scanner::fs_safe::{is_local_safe_path, open_regular_nofollow};
+use crate::scanner::indicators::inspect_pe_original_filename;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::Path;
 use std::time::SystemTime;
@@ -9,12 +11,15 @@ use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind, Users};
 
 const MAX_HASH_FILE_SIZE: u64 = 20 * 1024 * 1024;
 const MAX_LINEAGE_DEPTH: usize = 6;
+const MAX_HASH_CACHE_ENTRIES: usize = 2048;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct CachedHash {
     pub file_len: u64,
     pub modified: Option<SystemTime>,
     pub sha256: Option<String>,
+    pub original_filename: Option<String>,
+    pub pe_checked: bool,
 }
 
 pub fn check_is_elevated() -> bool {
@@ -49,7 +54,7 @@ pub fn check_is_elevated() -> bool {
 pub fn collect_processes(sys: &mut System, users: &Users) -> HashMap<u32, ProcessRecord> {
     let refresh_kind = ProcessRefreshKind::nothing()
         .with_exe(UpdateKind::OnlyIfNotSet)
-        .with_cmd(UpdateKind::OnlyIfNotSet)
+        .with_cmd(UpdateKind::Always)
         .with_user(UpdateKind::OnlyIfNotSet)
         .with_memory()
         .with_cpu();
@@ -72,12 +77,14 @@ pub fn collect_processes(sys: &mut System, users: &Users) -> HashMap<u32, Proces
         let cmdline = if proc_info.cmd().is_empty() {
             name.clone()
         } else {
-            proc_info
-                .cmd()
-                .iter()
-                .map(|s| s.to_string_lossy())
-                .collect::<Vec<_>>()
-                .join(" ")
+            let mut joined = String::new();
+            for (idx, arg) in proc_info.cmd().iter().enumerate() {
+                if idx > 0 {
+                    joined.push(' ');
+                }
+                joined.push_str(&arg.to_string_lossy());
+            }
+            joined
         };
 
         let user = proc_info
@@ -87,8 +94,10 @@ pub fn collect_processes(sys: &mut System, users: &Users) -> HashMap<u32, Proces
             .unwrap_or_else(|| "SYSTEM".to_string());
 
         let is_deleted_binary = is_unlinked_binary(pid_u32, &exe_path);
-        let exe_exists_on_disk = !exe_path.is_empty()
-            && Path::new(exe_path.trim_end_matches(" (deleted)")).exists();
+        let clean_exe = exe_path.trim_end_matches(" (deleted)");
+        let exe_exists_on_disk = !clean_exe.is_empty()
+            && is_local_safe_path(Path::new(clean_exe))
+            && Path::new(clean_exe).is_file();
 
         records.insert(
             pid_u32,
@@ -100,6 +109,7 @@ pub fn collect_processes(sys: &mut System, users: &Users) -> HashMap<u32, Proces
                 cmdline,
                 user,
                 sha256: None,
+                original_filename: None,
                 lineage: Vec::new(),
                 cpu_usage: proc_info.cpu_usage(),
                 memory_bytes: proc_info.memory(),
@@ -112,13 +122,26 @@ pub fn collect_processes(sys: &mut System, users: &Users) -> HashMap<u32, Proces
         );
     }
 
-    let parent_index: HashMap<u32, (Option<u32>, String)> = records
-        .iter()
-        .map(|(&pid, rec)| (pid, (rec.ppid, rec.name.clone())))
-        .collect();
+    let lineages: Vec<(u32, Vec<String>)> = {
+        let parent_index: HashMap<u32, (Option<u32>, &str)> = records
+            .iter()
+            .map(|(&pid, rec)| (pid, (rec.ppid, rec.name.as_str())))
+            .collect();
+        records
+            .values()
+            .map(|rec| {
+                (
+                    rec.pid,
+                    build_lineage(rec.pid, rec.ppid, &rec.name, &parent_index),
+                )
+            })
+            .collect()
+    };
 
-    for rec in records.values_mut() {
-        rec.lineage = build_lineage(rec.pid, rec.ppid, &rec.name, &parent_index);
+    for (pid, lineage) in lineages {
+        if let Some(rec) = records.get_mut(&pid) {
+            rec.lineage = lineage;
+        }
     }
 
     records
@@ -128,18 +151,22 @@ fn build_lineage(
     pid: u32,
     mut curr_ppid: Option<u32>,
     name: &str,
-    parent_index: &HashMap<u32, (Option<u32>, String)>,
+    parent_index: &HashMap<u32, (Option<u32>, &str)>,
 ) -> Vec<String> {
     let mut chain = Vec::with_capacity(MAX_LINEAGE_DEPTH + 1);
-    let mut visited = HashSet::new();
-    visited.insert(pid);
+    let mut visited = [0u32; MAX_LINEAGE_DEPTH + 1];
+    visited[0] = pid;
+    let mut visited_len = 1usize;
     chain.push(format!("{}({})", name, pid));
 
-    let mut depth = 0;
+    let mut depth = 0usize;
     while let Some(p) = curr_ppid {
-        if p == 0 || !visited.insert(p) || depth >= MAX_LINEAGE_DEPTH {
+        if p == 0 || depth >= MAX_LINEAGE_DEPTH || visited[..visited_len].contains(&p) {
             break;
         }
+        visited[visited_len] = p;
+        visited_len += 1;
+
         match parent_index.get(&p) {
             Some((next_ppid, pname)) => {
                 chain.push(format!("{}({})", pname, p));
@@ -157,10 +184,25 @@ fn build_lineage(
     chain
 }
 
+/// Populates cached PE `OriginalFilename` metadata before heuristic evaluation so renamed
+/// system utilities and LOLBins (`powershell.exe` -> `updater.exe`) are exposed to all rules.
+pub fn enrich_pe_identities(
+    processes: &mut HashMap<u32, ProcessRecord>,
+    hash_cache: &mut HashMap<String, CachedHash>,
+) {
+    trim_cache_if_needed(hash_cache);
+    for rec in processes.values_mut() {
+        if rec.exe_exists_on_disk && !rec.exe_path.is_empty() {
+            rec.original_filename = compute_cached_pe_name(&rec.exe_path, hash_cache);
+        }
+    }
+}
+
 pub fn enrich_sha256_hashes(
     processes: &mut HashMap<u32, ProcessRecord>,
     hash_cache: &mut HashMap<String, CachedHash>,
 ) {
+    trim_cache_if_needed(hash_cache);
     for rec in processes.values_mut() {
         if rec.exe_exists_on_disk
             && !rec.exe_path.is_empty()
@@ -168,6 +210,12 @@ pub fn enrich_sha256_hashes(
         {
             rec.sha256 = compute_cached_sha256(&rec.exe_path, hash_cache);
         }
+    }
+}
+
+fn trim_cache_if_needed(cache: &mut HashMap<String, CachedHash>) {
+    if cache.len() > MAX_HASH_CACHE_ENTRIES {
+        cache.clear();
     }
 }
 
@@ -181,14 +229,56 @@ fn is_unlinked_binary(pid: u32, exe_path: &str) -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        if let Ok(link) = std::fs::read_link(format!("/proc/{}/exe", pid)) {
-            let target = link.to_string_lossy();
-            if target.ends_with(" (deleted)") || target.contains("memfd:") {
-                return true;
+        if exe_path.is_empty() {
+            if let Ok(link) = std::fs::read_link(format!("/proc/{}/exe", pid)) {
+                let target = link.to_string_lossy();
+                if target.ends_with(" (deleted)") || target.contains("memfd:") {
+                    return true;
+                }
             }
         }
     }
     false
+}
+
+pub fn compute_cached_pe_name(
+    exe_path: &str,
+    cache: &mut HashMap<String, CachedHash>,
+) -> Option<String> {
+    let path = Path::new(exe_path);
+    if !is_local_safe_path(path) {
+        return None;
+    }
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() || !meta.file_type().is_file() {
+        return None;
+    }
+    let file_len = meta.len();
+    let modified = meta.modified().ok();
+
+    if let Some(entry) = cache.get(exe_path) {
+        if entry.file_len == file_len && entry.modified == modified && entry.pe_checked {
+            return entry.original_filename.clone();
+        }
+    }
+
+    let orig = inspect_pe_original_filename(path);
+    let existing_sha = cache
+        .get(exe_path)
+        .filter(|e| e.file_len == file_len && e.modified == modified)
+        .and_then(|e| e.sha256.clone());
+
+    cache.insert(
+        exe_path.to_string(),
+        CachedHash {
+            file_len,
+            modified,
+            sha256: existing_sha,
+            original_filename: orig.clone(),
+            pe_checked: true,
+        },
+    );
+    orig
 }
 
 pub fn compute_cached_sha256(
@@ -196,10 +286,7 @@ pub fn compute_cached_sha256(
     cache: &mut HashMap<String, CachedHash>,
 ) -> Option<String> {
     let path = Path::new(exe_path);
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() {
-        return None;
-    }
+    let (file, meta) = open_regular_nofollow(path)?;
 
     let file_len = meta.len();
     if file_len == 0 || file_len > MAX_HASH_FILE_SIZE {
@@ -209,22 +296,40 @@ pub fn compute_cached_sha256(
 
     if let Some(entry) = cache.get(exe_path) {
         if entry.file_len == file_len && entry.modified == modified {
-            return entry.sha256.clone();
+            if let Some(sha) = &entry.sha256 {
+                return Some(sha.clone());
+            }
         }
     }
 
-    let mut file = File::open(path).ok()?;
+    let mut reader = file.take(MAX_HASH_FILE_SIZE + 1);
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
+    let mut total_read = 0u64;
     loop {
-        let n = file.read(&mut buf).ok()?;
+        let n = reader.read(&mut buf).ok()?;
         if n == 0 {
             break;
         }
+        total_read += n as u64;
+        if total_read > MAX_HASH_FILE_SIZE {
+            return None;
+        }
         hasher.update(&buf[..n]);
     }
-    // sha2 0.11 digests no longer implement LowerHex.
-    let digest: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+
+    // Format digest in one pre-sized 64-byte string without per-byte heap allocations.
+    let raw_digest = hasher.finalize();
+    let mut digest = String::with_capacity(64);
+    for b in raw_digest.iter() {
+        let _ = write!(&mut digest, "{b:02x}");
+    }
+
+    let (orig, pe_checked) = cache
+        .get(exe_path)
+        .filter(|e| e.file_len == file_len && e.modified == modified)
+        .map(|e| (e.original_filename.clone(), e.pe_checked))
+        .unwrap_or((None, false));
 
     cache.insert(
         exe_path.to_string(),
@@ -232,6 +337,8 @@ pub fn compute_cached_sha256(
             file_len,
             modified,
             sha256: Some(digest.clone()),
+            original_filename: orig,
+            pe_checked,
         },
     );
 
@@ -250,9 +357,24 @@ mod tests {
         let mut cache = HashMap::new();
 
         let expected = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-        assert_eq!(compute_cached_sha256(&exe, &mut cache).as_deref(), Some(expected));
+        assert_eq!(
+            compute_cached_sha256(&exe, &mut cache).as_deref(),
+            Some(expected)
+        );
         assert_eq!(cache.len(), 1);
-        assert_eq!(compute_cached_sha256(&exe, &mut cache).as_deref(), Some(expected));
+        assert_eq!(
+            compute_cached_sha256(&exe, &mut cache).as_deref(),
+            Some(expected)
+        );
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn lineage_handles_cycles_without_infinite_loop() {
+        let mut index = HashMap::new();
+        index.insert(10, (Some(20), "child"));
+        index.insert(20, (Some(10), "parent"));
+        let chain = build_lineage(10, Some(20), "child", &index);
+        assert_eq!(chain, vec!["parent(20)", "child(10)"]);
     }
 }
