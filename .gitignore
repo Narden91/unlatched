@@ -5,6 +5,8 @@ safe_door_report.json
 safe_door_report.md
 safe_door_report.sarif.json
 safe_door_allowlist.json
+safe_door_wifi_lockdown.ps1
+safe_door_wifi_lockdown.sh
 *report*.json
 *report*.md
 *report*.sarif

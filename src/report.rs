@@ -274,6 +274,46 @@ pub fn export_markdown_report(snapshot: &ScanSnapshot, path: &Path) -> Result<()
         ));
     }
 
+    if let Some(ws) = &snapshot.wifi_shield {
+        md.push_str("\n## Public Wi-Fi & MitM Shield\n\n");
+        if ws.connected {
+            md.push_str(&format!(
+                "- **SSID / BSSID:** `{}` (`{}`) on `{}`\n",
+                md_code(&ws.ssid),
+                md_code(&ws.bssid),
+                md_code(&ws.interface_name)
+            ));
+            md.push_str(&format!(
+                "- **Link Cipher & Profile:** {} / {} | Profile: **{}** | Wi-Fi Score: **{}/100 ({})**\n",
+                md_text(&ws.auth_suite),
+                md_text(&ws.cipher_suite),
+                ws.profile_category.label(),
+                ws.wifi_safety_score,
+                md_text(&ws.wifi_grade)
+            ));
+            md.push_str(&format!(
+                "- **Gateway / VPN:** Gateway `{:?}` (MAC `{}`) | VPN Active: **{}**\n\n",
+                ws.gateway_ip,
+                md_code(ws.gateway_mac.as_deref().unwrap_or("unresolved")),
+                ws.vpn_active
+            ));
+            md.push_str("| ID | Status | Vector | Detail | Recommendation |\n");
+            md.push_str("| :---: | :---: | :--- | :--- | :--- |\n");
+            for chk in &ws.checks {
+                md.push_str(&format!(
+                    "| `{}` | **{}** | {} | {} | {} |\n",
+                    md_code(&chk.check_id),
+                    chk.status.label(),
+                    md_text(&chk.vector),
+                    md_text(&chk.detail),
+                    md_text(&chk.recommendation)
+                ));
+            }
+        } else {
+            md.push_str("Wireless interface disconnected or not present.\n");
+        }
+    }
+
     write_report_atomic(path, md.as_bytes())
 }
 
@@ -472,9 +512,27 @@ pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
         String::new()
     };
     println!(
-        "  Findings       : {bold}{red}CRITICAL: {}{reset}  |  {bold}{magenta}HIGH: {}{reset}  |  {bold}{yellow}MEDIUM: {}{reset}  |  {dim}LOW: {}{reset}{suppressed_note}\n",
+        "  Findings       : {bold}{red}CRITICAL: {}{reset}  |  {bold}{magenta}HIGH: {}{reset}  |  {bold}{yellow}MEDIUM: {}{reset}  |  {dim}LOW: {}{reset}{suppressed_note}",
         snapshot.critical_count, snapshot.high_count, snapshot.medium_count, snapshot.low_count
     );
+    if let Some(ws) = &snapshot.wifi_shield {
+        if ws.connected {
+            let w_col = match ws.wifi_safety_score {
+                85..=100 => green,
+                65..=84 => yellow,
+                _ => red,
+            };
+            println!(
+                "  Wi-Fi Shield   : {bold}{w_col}{}/100 [{}]{reset}  |  SSID: {bold}{}{reset} ({})  |  Profile: {}",
+                ws.wifi_safety_score,
+                ws.wifi_grade,
+                ws.ssid,
+                ws.auth_suite,
+                ws.profile_category.label()
+            );
+        }
+    }
+    println!();
 
     if snapshot.sockets_without_exe > 0 {
         println!(
@@ -578,6 +636,111 @@ pub fn print_cli_summary(snapshot: &ScanSnapshot, only_flagged: bool) {
         );
     }
     println!();
+}
+
+/// Prints the dedicated `--wifi-shield` Zero-Trust Public Wi-Fi & MitM Radar CLI report.
+pub fn print_wifi_shield_cli(snapshot: &ScanSnapshot) {
+    let reset = "\x1b[0m";
+    let bold = "\x1b[1m";
+    let cyan = "\x1b[36m";
+    let green = "\x1b[32m";
+    let yellow = "\x1b[33m";
+    let red = "\x1b[31m";
+
+    println!(
+        "\n{bold}{cyan}Unlatched Wi-Fi Shield & MitM Link Radar{reset}  {} ({}ms)",
+        snapshot.hostname, snapshot.scan_duration_ms
+    );
+    let Some(ws) = &snapshot.wifi_shield else {
+        println!("  Wi-Fi telemetry unavailable on this platform.\n");
+        return;
+    };
+    if !ws.connected {
+        println!("  Radio State    : {yellow}DISCONNECTED{reset} (no active 802.11 wireless association)\n");
+        return;
+    }
+
+    let w_col = match ws.wifi_safety_score {
+        85..=100 => green,
+        65..=84 => yellow,
+        _ => red,
+    };
+    let dns_str = if ws.dns_servers.is_empty() {
+        "none".to_string()
+    } else {
+        ws.dns_servers
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let vpn_str = if ws.vpn_active {
+        format!("{green}ACTIVE ({}){reset}", ws.vpn_interfaces.join(", "))
+    } else {
+        format!("{yellow}INACTIVE (direct Wi-Fi egress){reset}")
+    };
+
+    println!(
+        "  Wi-Fi Score    : {bold}{w_col}{}/100 [{}]{reset}   |   Profile: {bold}{}{reset}",
+        ws.wifi_safety_score,
+        ws.wifi_grade,
+        ws.profile_category.label()
+    );
+    println!(
+        "  SSID / BSSID   : {bold}{}{reset}  ({} on {}, {}%)",
+        ws.ssid,
+        ws.bssid,
+        ws.interface_name,
+        ws.signal_percent.unwrap_or(0)
+    );
+    println!(
+        "  802.11 Cipher  : {} / {} ({})",
+        ws.auth_suite, ws.cipher_suite, ws.radio_info
+    );
+    println!(
+        "  L3 Gateway/DNS : IP {} /{} -> Gateway {} (MAC {}) | DNS: {}",
+        ws.local_ip
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        ws.subnet_prefix.unwrap_or(24),
+        ws.gateway_ip
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        ws.gateway_mac.as_deref().unwrap_or("unresolved"),
+        dns_str
+    );
+    println!(
+        "  Tunnel & Ports : VPN: {}  |  Exposed LAN Ports: {bold}{}{reset} (Shadow AI: {bold}{}{reset}, Cleartext: {bold}{}{reset})\n",
+        vpn_str,
+        ws.exposed_lan_listeners,
+        ws.exposed_shadow_ai_ports.len(),
+        ws.cleartext_sockets
+    );
+
+    println!("{bold}ZERO-TRUST WI-FI RADAR CHECKS ({}){reset}", ws.checks.len());
+    println!("{}", "-".repeat(92));
+    for chk in &ws.checks {
+        let st_col = match chk.status {
+            AuditStatus::Critical => red,
+            AuditStatus::Warning => yellow,
+            AuditStatus::Info => cyan,
+            AuditStatus::Pass => green,
+        };
+        println!(
+            "  {bold}{st_col}[{:^5}]{reset} {:<8} {:<26} -> {}",
+            chk.status.label(),
+            chk.check_id,
+            truncate_str(&chk.vector, 25),
+            chk.detail
+        );
+        if matches!(chk.status, AuditStatus::Critical | AuditStatus::Warning) {
+            println!("                   Action: {}", chk.recommendation);
+        }
+    }
+    println!(
+        "\n  Tip: Run with {bold}--export-lockdown safe_door_wifi_lockdown.{}{reset} (or press {bold}[l]{reset} in TUI) to generate a rollback-capable firewall shield.\n",
+        if cfg!(windows) { "ps1" } else { "sh" }
+    );
 }
 
 /// Single-pass UTF-8 truncation that returns `Cow::Borrowed` with zero allocation whenever `s` fits.
@@ -716,6 +879,7 @@ mod tests {
             audit_items: Vec::new(),
             processes: Vec::new(),
             timeline_events: Vec::new(),
+            wifi_shield: None,
         };
 
         let sarif = build_sarif_value(&snap);

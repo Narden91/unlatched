@@ -395,6 +395,69 @@ pub fn score_and_grade(findings: &[SecurityFinding], incomplete: bool) -> (u8, S
     (score, grade.to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WifiProfileCategory {
+    Public,
+    Private,
+    Domain,
+    Unknown,
+}
+
+impl WifiProfileCategory {
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            WifiProfileCategory::Public => "PUBLIC (Zero-Trust)",
+            WifiProfileCategory::Private => "PRIVATE (Trusted LAN)",
+            WifiProfileCategory::Domain => "DOMAIN (Enterprise)",
+            WifiProfileCategory::Unknown => "UNKNOWN",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WifiRiskCheck {
+    pub check_id: String,
+    pub vector: String,
+    pub status: AuditStatus,
+    pub severity: Severity,
+    pub detail: String,
+    pub recommendation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WifiShieldReport {
+    pub connected: bool,
+    pub interface_name: String,
+    pub interface_guid: Option<String>,
+    pub interface_index: Option<u32>,
+    pub ssid: String,
+    pub bssid: String,
+    pub auth_suite: String,
+    pub cipher_suite: String,
+    pub radio_info: String,
+    pub signal_percent: Option<u8>,
+    pub rssi_dbm: Option<i32>,
+    pub profile_category: WifiProfileCategory,
+    pub local_ip: Option<IpAddr>,
+    pub subnet_prefix: Option<u8>,
+    pub gateway_ip: Option<IpAddr>,
+    pub gateway_mac: Option<String>,
+    pub dhcp_server: Option<IpAddr>,
+    pub dns_servers: Vec<IpAddr>,
+    pub vpn_active: bool,
+    pub vpn_interfaces: Vec<String>,
+    pub tunnelvision_bypass: bool,
+    pub is_public_or_guest_ssid: bool,
+    pub wifi_safety_score: u8,
+    pub wifi_grade: String,
+    pub risk_level: Severity,
+    pub exposed_lan_listeners: usize,
+    pub exposed_shadow_ai_ports: Vec<u16>,
+    pub cleartext_sockets: usize,
+    pub checks: Vec<WifiRiskCheck>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanSnapshot {
     pub timestamp: DateTime<Local>,
@@ -430,6 +493,8 @@ pub struct ScanSnapshot {
     pub processes: Vec<ProcessRecord>,
     #[serde(default)]
     pub timeline_events: Vec<TimelineEvent>,
+    #[serde(default)]
+    pub wifi_shield: Option<WifiShieldReport>,
 }
 
 impl ScanSnapshot {
@@ -570,6 +635,32 @@ impl ScanSnapshot {
         for ev in &mut self.timeline_events {
             for s in [&mut ev.process_name, &mut ev.endpoint, &mut ev.summary] {
                 fix(s);
+            }
+        }
+        if let Some(ws) = &mut self.wifi_shield {
+            for s in [
+                &mut ws.interface_name,
+                &mut ws.ssid,
+                &mut ws.bssid,
+                &mut ws.auth_suite,
+                &mut ws.cipher_suite,
+                &mut ws.radio_info,
+                &mut ws.wifi_grade,
+            ] {
+                fix(s);
+            }
+            fix_opt(&mut ws.interface_guid);
+            fix_opt(&mut ws.gateway_mac);
+            fix_all(&mut ws.vpn_interfaces);
+            for chk in &mut ws.checks {
+                for s in [
+                    &mut chk.check_id,
+                    &mut chk.vector,
+                    &mut chk.detail,
+                    &mut chk.recommendation,
+                ] {
+                    fix(s);
+                }
             }
         }
     }

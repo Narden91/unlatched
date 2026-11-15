@@ -3,6 +3,7 @@ use crate::baseline::socket_key;
 use crate::flight::FlightRecorder;
 use crate::models::{cmp_ci, contains_ci, IpCategory, ScanSnapshot, Severity};
 use crate::report::{export_json_report, export_markdown_report, export_sarif_report};
+use crate::scanner::wifi_shield::{default_lockdown_script_filename, export_wifi_lockdown_script};
 use crate::scanner::ScannerEngine;
 use ratatui::widgets::TableState;
 use std::collections::HashSet;
@@ -19,6 +20,7 @@ pub enum ActiveTab {
     Audit,
     Processes,
     Events,
+    WifiShield,
 }
 
 impl ActiveTab {
@@ -31,6 +33,7 @@ impl ActiveTab {
             ActiveTab::Audit => 3,
             ActiveTab::Processes => 4,
             ActiveTab::Events => 5,
+            ActiveTab::WifiShield => 6,
         }
     }
 
@@ -42,19 +45,21 @@ impl ActiveTab {
             ActiveTab::Findings => ActiveTab::Audit,
             ActiveTab::Audit => ActiveTab::Processes,
             ActiveTab::Processes => ActiveTab::Events,
-            ActiveTab::Events => ActiveTab::Overview,
+            ActiveTab::Events => ActiveTab::WifiShield,
+            ActiveTab::WifiShield => ActiveTab::Overview,
         }
     }
 
     #[must_use]
     pub fn prev(&self) -> Self {
         match self {
-            ActiveTab::Overview => ActiveTab::Events,
+            ActiveTab::Overview => ActiveTab::WifiShield,
             ActiveTab::Connections => ActiveTab::Overview,
             ActiveTab::Findings => ActiveTab::Connections,
             ActiveTab::Audit => ActiveTab::Findings,
             ActiveTab::Processes => ActiveTab::Audit,
             ActiveTab::Events => ActiveTab::Processes,
+            ActiveTab::WifiShield => ActiveTab::Events,
         }
     }
 }
@@ -188,12 +193,14 @@ pub struct App {
     pub audit_table_state: TableState,
     pub proc_table_state: TableState,
     pub event_table_state: TableState,
+    pub wifi_table_state: TableState,
 
     pub(crate) conn_indices: Vec<usize>,
     pub(crate) finding_indices: Vec<usize>,
     pub(crate) audit_indices: Vec<usize>,
     pub(crate) proc_indices: Vec<usize>,
     pub(crate) event_indices: Vec<usize>,
+    pub(crate) wifi_indices: Vec<usize>,
     needs_redraw: bool,
 }
 
@@ -242,11 +249,13 @@ impl App {
             audit_table_state: TableState::default(),
             proc_table_state: TableState::default(),
             event_table_state: TableState::default(),
+            wifi_table_state: TableState::default(),
             conn_indices: Vec::new(),
             finding_indices: Vec::new(),
             audit_indices: Vec::new(),
             proc_indices: Vec::new(),
             event_indices: Vec::new(),
+            wifi_indices: Vec::new(),
             needs_redraw: true,
         };
         app.rebuild_views();
@@ -353,6 +362,27 @@ impl App {
             }
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
                 self.set_status(format!("Export error: {}", e));
+            }
+        }
+    }
+
+    /// Exports a pure 7-bit ASCII, rollback-capable Zero-Trust Wi-Fi Lockdown Script (`[l]` key).
+    pub fn export_wifi_lockdown(&mut self) {
+        let filename = default_lockdown_script_filename();
+        let path = Path::new(filename);
+        match export_wifi_lockdown_script(
+            &self.snapshot.connections,
+            self.snapshot.wifi_shield.as_ref(),
+            path,
+        ) {
+            Ok(()) => {
+                self.set_status(format!(
+                    "Saved Zero-Trust Wi-Fi Shield script -> {} (run as Admin/root; supports rollback)",
+                    filename
+                ));
+            }
+            Err(e) => {
+                self.set_status(format!("Lockdown script export error: {}", e));
             }
         }
     }
@@ -589,6 +619,20 @@ impl App {
             }
         }
 
+        self.wifi_indices.clear();
+        if let Some(ws) = &self.snapshot.wifi_shield {
+            for (idx, chk) in ws.checks.iter().enumerate() {
+                if q.is_empty()
+                    || contains_ci(&chk.check_id, &q)
+                    || contains_ci(&chk.vector, &q)
+                    || contains_ci(&chk.detail, &q)
+                    || contains_ci(&chk.recommendation, &q)
+                {
+                    self.wifi_indices.push(idx);
+                }
+            }
+        }
+
         self.clamp_selections();
         self.needs_redraw = true;
     }
@@ -618,6 +662,9 @@ impl App {
             ActiveTab::Events => {
                 advance_table(&mut self.event_table_state, self.event_indices.len(), step, true);
             }
+            ActiveTab::WifiShield => {
+                advance_table(&mut self.wifi_table_state, self.wifi_indices.len(), step, true);
+            }
         }
         self.needs_redraw = true;
     }
@@ -645,6 +692,9 @@ impl App {
             ActiveTab::Events => {
                 advance_table(&mut self.event_table_state, self.event_indices.len(), step, false);
             }
+            ActiveTab::WifiShield => {
+                advance_table(&mut self.wifi_table_state, self.wifi_indices.len(), step, false);
+            }
         }
         self.needs_redraw = true;
     }
@@ -655,6 +705,7 @@ impl App {
         clamp_table(&mut self.audit_table_state, self.audit_indices.len());
         clamp_table(&mut self.proc_table_state, self.proc_indices.len());
         clamp_table(&mut self.event_table_state, self.event_indices.len());
+        clamp_table(&mut self.wifi_table_state, self.wifi_indices.len());
     }
 }
 
@@ -787,6 +838,7 @@ mod tests {
             audit_items: Vec::new(),
             processes: vec![proc_rec],
             timeline_events: Vec::new(),
+            wifi_shield: None,
         };
         snap.recompute_summary();
 

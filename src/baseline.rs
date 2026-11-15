@@ -303,6 +303,7 @@ mod tests {
             audit_items,
             processes,
             timeline_events: Vec::new(),
+            wifi_shield: None,
         }
     }
 

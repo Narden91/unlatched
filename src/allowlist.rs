@@ -379,6 +379,7 @@ mod tests {
             audit_items: Vec::new(),
             processes: vec![proc_rec],
             timeline_events: Vec::new(),
+            wifi_shield: None,
         };
         snap.recompute_summary();
         snap

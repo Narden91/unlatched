@@ -15,7 +15,9 @@ use flight::FlightRecorder;
 use ratatui::{backend::CrosstermBackend, Terminal};
 use report::{
     export_json_report, export_markdown_report, export_sarif_report, print_cli_summary,
+    print_wifi_shield_cli,
 };
+use scanner::wifi_shield::export_wifi_lockdown_script;
 use scanner::ScannerEngine;
 use std::io;
 use std::path::PathBuf;
@@ -68,6 +70,14 @@ struct CliArgs {
     /// Stop headless --watch mode after N scan cycles (default: run until interrupted)
     #[arg(long, value_name = "N")]
     watch_cycles: Option<usize>,
+
+    /// Run a focused Zero-Trust Public Wi-Fi & MitM Link Radar terminal check
+    #[arg(long)]
+    wifi_shield: bool,
+
+    /// Export a rollback-capable, 7-bit ASCII Zero-Trust Public Wi-Fi Lockdown Script (.ps1 / .sh)
+    #[arg(long, value_name = "FILE")]
+    export_lockdown: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -89,10 +99,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let one_shot = args.cli
+        || args.wifi_shield
         || args.json
         || args.export_md.is_some()
         || args.export_json.is_some()
         || args.export_sarif.is_some()
+        || args.export_lockdown.is_some()
         || args.diff.is_some();
 
     let mut engine = ScannerEngine::new();
@@ -121,6 +133,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         if args.cli {
             print_cli_summary(&snapshot, args.flagged);
+        }
+        if args.wifi_shield {
+            print_wifi_shield_cli(&snapshot);
         }
         if let Some(d) = &diff {
             println!("{}", d.render());
@@ -153,6 +168,19 @@ fn write_requested_exports(
         export_sarif_report(snapshot, sarif_path)?;
         if !args.json {
             eprintln!("Saved SARIF v2.1.0 report: {}", sarif_path.display());
+        }
+    }
+    if let Some(lockdown_path) = &args.export_lockdown {
+        export_wifi_lockdown_script(
+            &snapshot.connections,
+            snapshot.wifi_shield.as_ref(),
+            lockdown_path,
+        )?;
+        if !args.json {
+            eprintln!(
+                "Saved Zero-Trust Wi-Fi Lockdown Script: {}",
+                lockdown_path.display()
+            );
         }
     }
     Ok(())
@@ -349,6 +377,10 @@ fn handle_key_press(app: &mut App, code: KeyCode) -> bool {
             app.active_tab = ActiveTab::Events;
             app.mark_redraw();
         }
+        KeyCode::Char('7') => {
+            app.active_tab = ActiveTab::WifiShield;
+            app.mark_redraw();
+        }
         KeyCode::Tab | KeyCode::Right => {
             app.active_tab = app.active_tab.next();
             app.mark_redraw();
@@ -394,6 +426,9 @@ fn handle_key_press(app: &mut App, code: KeyCode) -> bool {
         }
         KeyCode::Char('w') => {
             app.allowlist_selected();
+        }
+        KeyCode::Char('l') | KeyCode::Char('L') => {
+            app.export_wifi_lockdown();
         }
         KeyCode::Enter | KeyCode::Char('d') => {
             if app.active_tab == ActiveTab::Overview {

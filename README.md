@@ -32,6 +32,7 @@ Each connection maps to its owning process ID (PID), parent lineage chain, comma
 | `H07` | Encoded PowerShell flags (`-e`/`-enc`/`-encodedcommand`), download cradles, `/dev/tcp`, `curl \| sh`, and Windows LOLBin scriptlet execution. |
 | `H08` | **Transitive Loopback-Proxy Exposure** (`PROXY-EXP`): services bound to `127.0.0.1`/`[::1]` that are actively bridged by a local process listening on `0.0.0.0`/`::`, LAN, or a public IP. |
 | `H09` | **Statistical C2 Beaconing**: periodic low-jitter outbound callback flows detected across live/watch scans using Welford's online variance ($n \ge 4$ intervals, $CV = s/\mu \le 0.20$). |
+| `H10` | **Hostile Wi-Fi & MitM Link Radar**: unencrypted/WEP/TKIP Wi-Fi links, ARP gateway MAC spoofing/churn, Evil-Twin authentication downgrades, Private-profile misconfigurations on guest SSIDs, rogue DNS resolvers, TunnelVision (`CVE-2024-3661`) `/1` VPN-bypass routes, Shadow AI/MCP wildcard ports (`11434`, `1234`, `8000`, `3000`, `6333`, `8888`, `5555`), and live cleartext egress. |
 
 **Windows host audit:** Defender Firewall profile states (including Group Policy overrides), Registry `Run`/`RunOnce` keys, Registry-resolved `Startup` folders, and Winlogon `Shell` + `Userinit` helpers.
 
@@ -75,6 +76,8 @@ cargo build --release
 | `--allowlist FILE` | Suppress findings matching cryptographic 64-hex SHA-256 rules in `FILE` |
 | `--watch SECS` | Continuous headless flight-recorder & C2 beacon monitor polling every `SECS` seconds |
 | `--watch-cycles N` | Exit `--watch` mode after `N` scan cycles |
+| `--wifi-shield` | Run the **Zero-Trust Public Wi-Fi & MitM Link Radar** check and print wireless posture |
+| `--export-lockdown FILE` | Write a rollback-capable, pure 7-bit ASCII host firewall lockdown script (`.ps1` / `.sh`) |
 
 ```powershell
 # One-shot flagged triage + SARIF v2.1.0 export
@@ -90,12 +93,13 @@ Exit code is `2` whenever at least one un-suppressed `Critical` finding is prese
 
 | Key | Action |
 | :--- | :--- |
-| `1` to `6`, `Tab`, `Shift+Tab` | Switch views: Overview, Connections, Findings, Audit, Processes, **Events** |
+| `1` to `7`, `Tab`, `Shift+Tab` | Switch views: Overview, Connections, Findings, Audit, Processes, **Events**, **Wi-Fi Shield** |
 | `Up` / `Down`, `j` / `k`, `PgUp` / `PgDn` | Navigate table rows |
 | `f` | Cycle connection filter (`All`, `Listening`, `Established`, `Public IP`, `Flagged`) |
 | `s` | Cycle connection sort (`Risk`, `Port`, `Process`, `State`, `PID`) |
 | `/` | Live substring filter across the active tab |
 | `w` | Add the selected binary's **SHA-256** digest to `safe_door_allowlist.json` |
+| `l` | Export rollback-capable **Zero-Trust Public Wi-Fi Lockdown Script** (`safe_door_wifi_lockdown.ps1`/`.sh`) |
 | `r` | Trigger an immediate background scan |
 | `a` | Cycle auto-refresh (`3s`, `10s`, `Paused`) |
 | `e` | Export `safe_door_report.json`, `safe_door_report.md`, and `safe_door_report.sarif.json` |

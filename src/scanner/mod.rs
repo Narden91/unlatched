@@ -5,6 +5,7 @@ pub mod indicators;
 pub mod network;
 pub mod ports_db;
 pub mod process;
+pub mod wifi_shield;
 
 use crate::models::{cmp_ci, ProcessRecord, ScanSnapshot};
 use chrono::Local;
@@ -33,6 +34,7 @@ pub struct ScannerEngine {
     users: Users,
     hash_cache: HashMap<String, CachedHash>,
     dns_cache: DnsCache,
+    wifi_radar: wifi_shield::WifiRadarState,
     hostname: String,
     os_name: String,
     os_version: String,
@@ -53,6 +55,7 @@ impl ScannerEngine {
             users: Users::new_with_refreshed_list(),
             hash_cache: HashMap::new(),
             dns_cache: DnsCache::new(),
+            wifi_radar: wifi_shield::WifiRadarState::new(),
             hostname: System::host_name().unwrap_or_else(|| "localhost".to_string()),
             os_name: System::name().unwrap_or_else(|| std::env::consts::OS.to_string()),
             os_version: System::os_version().unwrap_or_else(|| "Unknown".to_string()),
@@ -94,6 +97,9 @@ impl ScannerEngine {
         }
 
         let audit_items = audit::run_host_security_audit(self.is_elevated, &mut findings);
+        let wifi_shield =
+            self.wifi_radar
+                .evaluate(&connections, &mut findings, self.is_elevated);
 
         findings.sort_by(|a, b| {
             b.severity
@@ -143,6 +149,7 @@ impl ScannerEngine {
             audit_items,
             processes,
             timeline_events: Vec::new(),
+            wifi_shield,
         };
         snapshot.recompute_summary();
         // After detection, which needs the raw text; before any output sees it.

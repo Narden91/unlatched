@@ -120,6 +120,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         ActiveTab::Audit => render_audit_tab(frame, app, root_chunks[2]),
         ActiveTab::Processes => render_processes_tab(frame, app, root_chunks[2]),
         ActiveTab::Events => render_events_tab(frame, app, root_chunks[2]),
+        ActiveTab::WifiShield => render_wifi_shield_tab(frame, app, root_chunks[2]),
     }
 
     render_footer(frame, app, root_chunks[3]);
@@ -269,6 +270,23 @@ fn render_tabs(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(COL_LOW),
             ),
         ]),
+        {
+            let (badge, col) = match &snap.wifi_shield {
+                Some(ws) if ws.connected => {
+                    let c = match ws.wifi_safety_score {
+                        85..=100 => COL_SAFE,
+                        65..=84 => COL_MED,
+                        _ => COL_CRIT,
+                    };
+                    (format!("({}/{}) ", ws.wifi_safety_score, ws.wifi_grade), c)
+                }
+                _ => ("(OFF) ".to_string(), COL_MUTED),
+            };
+            Line::from(vec![
+                Span::raw(" [7] Wi-Fi Shield "),
+                Span::styled(badge, Style::default().fg(col).add_modifier(Modifier::BOLD)),
+            ])
+        },
     ];
 
     let right_status = if !app.search_query.is_empty() {
@@ -1093,6 +1111,232 @@ fn render_events_tab(frame: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
+fn render_wifi_shield_tab(frame: &mut Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Min(8),
+            Constraint::Length(6),
+        ])
+        .split(area);
+
+    let snap = &app.snapshot;
+    let indices = &app.wifi_indices;
+    let state = &mut app.wifi_table_state;
+
+    // 1. Top Wireless Link & MitM Radar Summary Banner
+    let banner_lines = match &snap.wifi_shield {
+        Some(ws) if ws.connected => {
+            let score_col = match ws.wifi_safety_score {
+                85..=100 => COL_SAFE,
+                65..=84 => COL_MED,
+                _ => COL_CRIT,
+            };
+            let vpn_span = if ws.vpn_active {
+                Span::styled(
+                    format!("ACTIVE ({})", ws.vpn_interfaces.join(", ")),
+                    Style::default().fg(COL_SAFE).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    "INACTIVE (Direct Wi-Fi)",
+                    Style::default().fg(COL_MED).add_modifier(Modifier::BOLD),
+                )
+            };
+            let dns_str = if ws.dns_servers.is_empty() {
+                "none".to_string()
+            } else {
+                ws.dns_servers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            vec![
+                Line::from(vec![
+                    Span::styled(" SSID: ", Style::default().fg(COL_MUTED)),
+                    Span::styled(
+                        format!("{} ", ws.ssid),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("(BSSID {} | {}% | {}) ", ws.bssid, ws.signal_percent.unwrap_or(0), ws.radio_info),
+                        Style::default().fg(COL_ACCENT),
+                    ),
+                    Span::styled(" | Wi-Fi Safety: ", Style::default().fg(COL_MUTED)),
+                    Span::styled(
+                        format!("{}/100 [{}]", ws.wifi_safety_score, ws.wifi_grade),
+                        Style::default().fg(score_col).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Cipher: ", Style::default().fg(COL_MUTED)),
+                    Span::styled(
+                        format!("{} / {} ", ws.auth_suite, ws.cipher_suite),
+                        Style::default().fg(Color::White),
+                    ),
+                    Span::styled(" | Profile: ", Style::default().fg(COL_MUTED)),
+                    Span::styled(
+                        ws.profile_category.label(),
+                        Style::default().fg(if ws.profile_category == crate::models::WifiProfileCategory::Public {
+                            COL_SAFE
+                        } else {
+                            COL_MED
+                        }),
+                    ),
+                    Span::styled(" | VPN: ", Style::default().fg(COL_MUTED)),
+                    vpn_span,
+                ]),
+                Line::from(vec![
+                    Span::styled(" L3 Link: ", Style::default().fg(COL_MUTED)),
+                    Span::styled(
+                        format!(
+                            "{}/{} -> Gateway {} (MAC {}) | DNS: {} ",
+                            ws.local_ip.map(|i| i.to_string()).unwrap_or_else(|| "-".to_string()),
+                            ws.subnet_prefix.unwrap_or(24),
+                            ws.gateway_ip.map(|i| i.to_string()).unwrap_or_else(|| "-".to_string()),
+                            ws.gateway_mac.as_deref().unwrap_or("unresolved"),
+                            dns_str
+                        ),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Exposure: ", Style::default().fg(COL_MUTED)),
+                    Span::styled(
+                        format!(
+                            "{} LAN listener(s) | {} Shadow AI port(s) | {} Cleartext socket(s)  ",
+                            ws.exposed_lan_listeners,
+                            ws.exposed_shadow_ai_ports.len(),
+                            ws.cleartext_sockets
+                        ),
+                        Style::default().fg(if ws.exposed_shadow_ai_ports.is_empty() && ws.cleartext_sockets == 0 {
+                            COL_LOW
+                        } else {
+                            COL_CRIT
+                        }),
+                    ),
+                    Span::styled(
+                        "[Press 'l' to export rollback-capable Zero-Trust Lockdown Script]",
+                        Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+            ]
+        }
+        _ => vec![
+            Line::from(Span::styled(
+                " No active 802.11 Wi-Fi connection detected (host is on wired Ethernet or offline).",
+                Style::default().fg(COL_MUTED),
+            )),
+            Line::from(Span::styled(
+                " Press [l] at any time to pre-generate the Zero-Trust Public Wi-Fi firewall lockdown script.",
+                Style::default().fg(COL_ACCENT),
+            )),
+        ],
+    };
+
+    let banner = Paragraph::new(banner_lines).block(
+        Block::default()
+            .title(" Hostile Wi-Fi & MitM Link Radar ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(COL_ACCENT)),
+    );
+    frame.render_widget(banner, chunks[0]);
+
+    let checks_slice = snap
+        .wifi_shield
+        .as_ref()
+        .map(|w| w.checks.as_slice())
+        .unwrap_or(&[]);
+
+    let selected_chk = state
+        .selected()
+        .and_then(|i| indices.get(i))
+        .and_then(|&idx| checks_slice.get(idx));
+
+    let rows: Vec<Row> = if indices.is_empty() {
+        vec![Row::new(vec![
+            Cell::from("INFO"),
+            Cell::from("WIFI-00"),
+            Cell::from("Wireless Link"),
+            Cell::from("SAFE"),
+            Cell::from("No wireless checks match current search filter."),
+        ])]
+    } else {
+        indices
+            .iter()
+            .filter_map(|&idx| checks_slice.get(idx))
+            .map(|chk| {
+                let st_col = audit_status_color(chk.status);
+                let sev_col = severity_color(chk.severity);
+                Row::new(vec![
+                    Cell::from(Span::styled(
+                        chk.status.label(),
+                        Style::default().fg(st_col).add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(chk.check_id.as_str()),
+                    Cell::from(Span::styled(
+                        truncate_str(&chk.vector, 26),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        chk.severity.label(),
+                        Style::default().fg(sev_col).add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(truncate_str(&chk.detail, 76)),
+                ])
+            })
+            .collect()
+    };
+
+    let table = styled_table(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(28),
+            Constraint::Length(10),
+            Constraint::Min(30),
+        ],
+        &["STATUS", "CHECK ID", "THREAT VECTOR", "RISK", "LIVE TELEMETRY"],
+        format!(" Zero-Trust Wi-Fi Checks ({}) ", indices.len()),
+    );
+    frame.render_stateful_widget(table, chunks[1], state);
+
+    let inspector_lines = if let Some(chk) = selected_chk {
+        vec![
+            Line::from(vec![
+                Span::styled(" Vector   : ", Style::default().fg(COL_MUTED)),
+                Span::styled(
+                    format!("[{}] {} ({})", chk.status.label(), chk.vector, chk.check_id),
+                    Style::default()
+                        .fg(audit_status_color(chk.status))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Evidence : ", Style::default().fg(COL_MUTED)),
+                Span::styled(chk.detail.as_str(), Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled(" Action   : ", Style::default().fg(COL_MUTED)),
+                Span::styled(chk.recommendation.as_str(), Style::default().fg(COL_SAFE)),
+            ]),
+        ]
+    } else {
+        vec![Line::from(Span::styled(
+            " Select a Wi-Fi check above to inspect remediation guidance.",
+            Style::default().fg(COL_MUTED),
+        ))]
+    };
+
+    frame.render_widget(
+        inspector_panel(" Wi-Fi Mitigation & Lockdown ", inspector_lines, true),
+        chunks[2],
+    );
+}
+
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let key_style = Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD);
     let top_line = if app.is_searching {
@@ -1126,7 +1370,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         ])
     } else {
         Line::from(vec![
-            Span::styled(" [1-6/Tab]", key_style),
+            Span::styled(" [1-7/Tab]", key_style),
             Span::raw(" View  "),
             Span::styled("[j/k]", key_style),
             Span::raw(" Select  "),
@@ -1138,14 +1382,14 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(" Search  "),
             Span::styled("[w]", key_style),
             Span::raw(" Allowlist  "),
+            Span::styled("[l]", key_style),
+            Span::raw(" Lockdown  "),
             Span::styled("[r]", key_style),
             Span::raw(" Rescan  "),
             Span::styled("[a]", key_style),
             Span::raw(" Refresh  "),
             Span::styled("[e]", key_style),
             Span::raw(" Export  "),
-            Span::styled("[Enter]", key_style),
-            Span::raw(" Details  "),
             Span::styled("[?]", key_style),
             Span::raw(" Help  "),
             Span::styled(
@@ -1327,6 +1571,34 @@ fn render_detail_modal(frame: &mut Frame, app: &App) {
                 lines.push(Line::from(format!("Summary   : {}", ev.summary)));
             }
         }
+        ActiveTab::WifiShield => {
+            if let Some(ws) = &snap.wifi_shield {
+                if let Some(chk) = app
+                    .wifi_table_state
+                    .selected()
+                    .and_then(|i| app.wifi_indices.get(i))
+                    .and_then(|&idx| ws.checks.get(idx))
+                {
+                    lines.push(Line::from(Span::styled(
+                        format!("[{}] {} ({})", chk.status.label(), chk.vector, chk.check_id),
+                        Style::default()
+                            .fg(audit_status_color(chk.status))
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(format!("SSID / BSSID   : {} ({})", ws.ssid, ws.bssid)));
+                    lines.push(Line::from(format!(
+                        "Link Cipher    : {} / {}",
+                        ws.auth_suite, ws.cipher_suite
+                    )));
+                    lines.push(Line::from(format!("Risk Severity  : {}", chk.severity.label())));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(format!("Telemetry      : {}", chk.detail)));
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(format!("Recommendation : {}", chk.recommendation)));
+                }
+            }
+        }
     }
 
     lines.push(Line::from(""));
@@ -1356,13 +1628,14 @@ fn render_help_modal(frame: &mut Frame) {
             Style::default().fg(COL_ACCENT).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("  [1] - [6] / [Tab]   Switch views (Overview, Connections, Findings, Audit, Processes, Events)"),
+        Line::from("  [1] - [7] / [Tab]   Switch views (Overview, Connections, Findings, Audit, Processes, Events, Wi-Fi Shield)"),
         Line::from("  [Up/Down] / [j/k]   Move selection up or down"),
         Line::from("  [PgUp / PgDn]       Move selection 10 rows"),
         Line::from("  [f]                 Cycle connection filter"),
         Line::from("  [s]                 Cycle connection sort order"),
         Line::from("  [/]                 Filter current table by text"),
         Line::from("  [w]                 Allowlist selected binary by cryptographic SHA-256 digest"),
+        Line::from("  [l]                 Export rollback-capable Zero-Trust Public Wi-Fi Lockdown Script"),
         Line::from("  [r]                 Run immediate scan"),
         Line::from("  [a]                 Cycle auto-refresh interval (3s / 10s / Paused)"),
         Line::from("  [e]                 Export safe_door_report.{json, md, sarif.json}"),
@@ -1382,6 +1655,7 @@ fn render_help_modal(frame: &mut Frame) {
         Line::from("  - H07: Encoded PowerShell commands, download cradles, /dev/tcp, and LOLBins"),
         Line::from("  - H08: Loopback (127.0.0.1) services transitively exposed via a network-reachable proxy"),
         Line::from("  - H09: Periodic low-jitter outbound C2 beacon flows (Welford online CV <= 0.20)"),
+        Line::from("  - H10: Hostile Wi-Fi Radar (Open AP, ARP MitM, Evil-Twin downgrade, TunnelVision VPN bypass, Shadow AI)"),
         Line::from("  - AUD: Host firewall state, Registry Run/Winlogon, Cron, LD_PRELOAD, and hosts file"),
         Line::from(""),
         Line::from(Span::styled(
@@ -1427,13 +1701,14 @@ mod tests {
     use crate::scanner::ScannerEngine;
     use ratatui::{backend::TestBackend, Terminal};
 
-    const TABS: [ActiveTab; 6] = [
+    const TABS: [ActiveTab; 7] = [
         ActiveTab::Overview,
         ActiveTab::Connections,
         ActiveTab::Findings,
         ActiveTab::Audit,
         ActiveTab::Processes,
         ActiveTab::Events,
+        ActiveTab::WifiShield,
     ];
 
     /// Draws every tab and both modals on real scan data, at a normal and two tiny sizes.
@@ -1474,5 +1749,6 @@ mod tests {
         assert!(screen.contains("INCOMPLETE: Socket enumeration failed"));
         assert!(screen.contains("Allowlisted: 3"));
         assert!(screen.contains("[6] Events"));
+        assert!(screen.contains("[7] Wi-Fi Shield"));
     }
 }
