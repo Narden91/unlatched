@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1360 704" width="1360" height="704" role="img" aria-labelledby="title desc">
+  <title id="title">Unlatched TUI - Live Events &amp; Callback Timing Tab</title>
+  <desc id="desc">Events tab logging socket openings, closings, binary SHA-256 changes on disk, and Welford online variance C2 callback intervals.</desc>
+  <defs>
+    <style>
+      .mono { font-family: "Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Consolas", ui-monospace, monospace; }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1360" height="704" rx="14" fill="#070b10"/>
+  <rect x="8" y="8" width="1344" height="688" rx="10" fill="#0b0f14" stroke="#1f2937" stroke-width="1.5"/>
+  <rect x="8" y="8" width="1344" height="36" rx="10" fill="#111822"/>
+  <rect x="8" y="28" width="1344" height="16" fill="#111822"/>
+  <line x1="8" y1="44" x2="1352" y2="44" stroke="#1f2937" stroke-width="1.2"/>
+  <circle cx="28" cy="26" r="5.5" fill="#ff5f56"/>
+  <circle cx="46" cy="26" r="5.5" fill="#ffbd2e"/>
+  <circle cx="64" cy="26" r="5.5" fill="#27c93f"/>
+  <text x="680.0" y="30" class="mono" font-size="12" font-weight="700" text-anchor="middle" fill="#8b949e">safe_door_scanner</text>
+  <rect x="22" y="56" width="1316" height="46" rx="5" fill="#0e141b" stroke="#10b981" stroke-width="1.3"/>
+  <rect x="34" y="66" width="108" height="26" rx="4" fill="#10b981"/>
+  <text x="88.0" y="83.68" class="mono" font-size="13" font-weight="700" text-anchor="middle" fill="#06100c">UNLATCHED</text>
+  <rect x="150" y="66" width="118" height="26" rx="4" fill="#10b981"/>
+  <text x="209.0" y="83.32" class="mono" font-size="12" font-weight="700" text-anchor="middle" fill="#06100c">[ADMIN/ROOT]</text>
+  <text x="282" y="84" class="mono" font-size="13" font-weight="700" fill="#ffffff">Host: demo-workstation (Windows 11)</text>
+  <text x="584" y="84" class="mono" font-size="13" fill="#8b949e">| Score:</text>
+  <text x="658" y="84" class="mono" font-size="13" font-weight="700" fill="#f85149">64/100 [D]</text>
+  <text x="756" y="84" class="mono" font-size="13" fill="#8b949e">| Scan: 39ms (3s) @ 14:22:08</text>
+  <text x="1002" y="84" class="mono" font-size="13" font-weight="700" fill="#10b981">| Allowlisted: 2</text>
+  <rect x="22" y="112" width="1316" height="44" rx="5" fill="#0e141b" stroke="#2b3644" stroke-width="1.3"/>
+  <rect x="1118.4" y="148" width="203.6" height="16" fill="#0b0f14"/>
+  <text x="1126.4" y="160" class="mono" font-size="11" fill="#8b949e">View: All | Auto-Refresh: 3s</text>
+  <text x="42" y="139" class="mono" font-size="12" fill="#8b949e">[1] Overview</text>
+  <text x="190" y="139" class="mono" font-size="12" fill="#8b949e">[2] Connections</text>
+  <text x="307.5" y="139" class="mono" font-size="12" font-weight="700" fill="#10b981">(84)</text>
+  <text x="378" y="139" class="mono" font-size="12" fill="#8b949e">[3] Findings</text>
+  <text x="473.0" y="139" class="mono" font-size="12" font-weight="700" fill="#f85149">(7)</text>
+  <text x="538" y="139" class="mono" font-size="12" fill="#8b949e">[4] Audit</text>
+  <text x="610.5" y="139" class="mono" font-size="12" font-weight="700" fill="#d29922">(14)</text>
+  <text x="684" y="139" class="mono" font-size="12" fill="#8b949e">[5] Processes</text>
+  <text x="786.5" y="139" class="mono" font-size="12" font-weight="700" fill="#8b949e">(112)</text>
+  <rect x="852" y="121" width="134" height="26" rx="4" fill="#10b981"/>
+  <text x="919.0" y="138.32" class="mono" font-size="12" font-weight="700" text-anchor="middle" fill="#06100c">[6] Events (7)</text>
+  <text x="1008" y="139" class="mono" font-size="12" fill="#8b949e">[7] Wi-Fi Shield</text>
+  <text x="1133.0" y="139" class="mono" font-size="12" font-weight="700" fill="#f85149">(52/F)</text>
+  <text x="26" y="680" class="mono" font-size="12" font-weight="700" fill="#10b981">[1-7/Tab]</text>
+  <text x="98.5" y="680" class="mono" font-size="12" fill="#e6edf3">View</text>
+  <text x="144.5" y="680" class="mono" font-size="12" font-weight="700" fill="#10b981">[j/k]</text>
+  <text x="187.0" y="680" class="mono" font-size="12" fill="#e6edf3">Select</text>
+  <text x="248.0" y="680" class="mono" font-size="12" font-weight="700" fill="#10b981">[f]</text>
+  <text x="275.5" y="680" class="mono" font-size="12" fill="#e6edf3">Filter</text>
+  <text x="336.5" y="680" class="mono" font-size="12" font-weight="700" fill="#10b981">[s]</text>
+  <text x="364.0" y="680" class="mono" font-size="12" fill="#e6edf3">Sort</text>
+  <text x="410.0" y="680" class="mono" font-size="12" font-weight="700" fill="#10b981">[/]</text>
+  <text x="437.5" y="680" class="mono" font-size="12" fill="#e6edf3">Search</text>
+  <text x="498.5" y="680" class="mono" font-size="12" font-weight="700" fill="#10b981">[w]</text>
+  <text x="526.0" y="680" class="mono" font-size="12" fill="#e6edf3">Allowlist</text>
+  <text x="609.5" y="680" class="mono" font-size="12" font-weight="700" fill="#10b981">[l]</text>
+  <text x="637.0" y="680" class="mono" font-size="12" fill="#e6edf3">Lockdown</text>
+  <text x="713.0" y="680" class="mono" font-size="12" font-weight="700" fill="#10b981">[r]</text>
+  <text x="740.5" y="680" class="mono" font-size="12" fill="#e6edf3">Rescan</text>
+  <text x="801.5" y="680" class="mono" font-size="12" font-weight="700" fill="#10b981">[a]</text>
+  <text x="829.0" y="680" class="mono" font-size="12" fill="#e6edf3">Refresh</text>
+  <text x="897.5" y="680" class="mono" font-size="12" font-weight="700" fill="#10b981">[e]</text>
+  <text x="925.0" y="680" class="mono" font-size="12" fill="#e6edf3">Export</text>
+  <text x="986.0" y="680" class="mono" font-size="12" font-weight="700" fill="#10b981">[?]</text>
+  <text x="1013.5" y="680" class="mono" font-size="12" fill="#e6edf3">Help</text>
+  <text x="1059.5" y="680" class="mono" font-size="12" font-weight="700" fill="#f85149">[q]</text>
+  <text x="1087.0" y="680" class="mono" font-size="12" fill="#e6edf3">Quit</text>
+  <rect x="22" y="168" width="1316" height="366" rx="5" fill="#0e141b" stroke="#10b981" stroke-width="1.3"/>
+  <rect x="36" y="160" width="268.0" height="16" fill="#0b0f14"/>
+  <text x="44" y="172" class="mono" font-size="12" font-weight="700" fill="#10b981">Live Socket Event Log (7 / 256 max)</text>
+  <text x="48" y="196" class="mono" font-size="12" font-weight="700" fill="#10b981">TIME</text>
+  <text x="144" y="196" class="mono" font-size="12" font-weight="700" fill="#10b981">EVENT</text>
+  <text x="254" y="196" class="mono" font-size="12" font-weight="700" fill="#10b981">SEVERITY</text>
+  <text x="362" y="196" class="mono" font-size="12" font-weight="700" fill="#10b981">PID</text>
+  <text x="440" y="196" class="mono" font-size="12" font-weight="700" fill="#10b981">PROCESS</text>
+  <text x="612" y="196" class="mono" font-size="12" font-weight="700" fill="#10b981">SUMMARY</text>
+  <line x1="36" y1="206" x2="1324" y2="206" stroke="#2b3644" stroke-width="1.0"/>
+  <rect x="30" y="215" width="1300" height="26" rx="3" fill="#18222d"/>
+  <text x="34" y="232" class="mono" font-size="12" font-weight="700" fill="#10b981">&gt;</text>
+  <text x="48" y="232" class="mono" font-size="12" fill="#e6edf3">14:22:08</text>
+  <text x="144" y="232" class="mono" font-size="12" font-weight="700" fill="#f85149">BEACON</text>
+  <text x="254" y="232" class="mono" font-size="12" font-weight="700" fill="#f85149">CRITICAL</text>
+  <text x="362" y="232" class="mono" font-size="12" fill="#e6edf3">4812</text>
+  <text x="440" y="232" class="mono" font-size="12" font-weight="700" fill="#ffffff">updater.exe</text>
+  <text x="612" y="232" class="mono" font-size="12" fill="#e6edf3">Periodic callback to 203.0.113.99:443 (n=5 intervals, mean=15.0s, CV=0.04)</text>
+  <text x="48" y="267" class="mono" font-size="12" fill="#e6edf3">14:21:53</text>
+  <text x="144" y="267" class="mono" font-size="12" font-weight="700" fill="#f85149">MODIFIED</text>
+  <text x="254" y="267" class="mono" font-size="12" font-weight="700" fill="#f85149">CRITICAL</text>
+  <text x="362" y="267" class="mono" font-size="12" fill="#e6edf3">4812</text>
+  <text x="440" y="267" class="mono" font-size="12" font-weight="700" fill="#ffffff">updater.exe</text>
+  <text x="612" y="267" class="mono" font-size="12" fill="#e6edf3">On-disk SHA-256 changed: 9f86d081884c... -&gt; e3b0c44298fc...</text>
+  <text x="48" y="302" class="mono" font-size="12" fill="#e6edf3">14:21:38</text>
+  <text x="144" y="302" class="mono" font-size="12" font-weight="700" fill="#f59e0b">+LISTEN</text>
+  <text x="254" y="302" class="mono" font-size="12" font-weight="700" fill="#f59e0b">HIGH</text>
+  <text x="362" y="302" class="mono" font-size="12" fill="#e6edf3">6104</text>
+  <text x="440" y="302" class="mono" font-size="12" font-weight="700" fill="#ffffff">ngrok.exe</text>
+  <text x="612" y="302" class="mono" font-size="12" fill="#e6edf3">New wildcard listener TCP 0.0.0.0:4040 bridging 127.0.0.1:5432</text>
+  <text x="48" y="337" class="mono" font-size="12" fill="#e6edf3">14:21:23</text>
+  <text x="144" y="337" class="mono" font-size="12" font-weight="700" fill="#58a6ff">+CONNECT</text>
+  <text x="254" y="337" class="mono" font-size="12" font-weight="700" fill="#58a6ff">LOW</text>
+  <text x="362" y="337" class="mono" font-size="12" fill="#e6edf3">4812</text>
+  <text x="440" y="337" class="mono" font-size="12" font-weight="700" fill="#ffffff">updater.exe</text>
+  <text x="612" y="337" class="mono" font-size="12" fill="#e6edf3">Opened outbound TCP 198.51.100.42:52419 -&gt; 203.0.113.99:443</text>
+  <text x="48" y="372" class="mono" font-size="12" fill="#e6edf3">14:21:08</text>
+  <text x="144" y="372" class="mono" font-size="12" font-weight="700" fill="#58a6ff">+CONNECT</text>
+  <text x="254" y="372" class="mono" font-size="12" font-weight="700" fill="#58a6ff">LOW</text>
+  <text x="362" y="372" class="mono" font-size="12" fill="#e6edf3">4812</text>
+  <text x="440" y="372" class="mono" font-size="12" font-weight="700" fill="#ffffff">updater.exe</text>
+  <text x="612" y="372" class="mono" font-size="12" fill="#e6edf3">Opened outbound TCP 198.51.100.42:52401 -&gt; 203.0.113.99:443</text>
+  <text x="48" y="407" class="mono" font-size="12" fill="#e6edf3">14:20:53</text>
+  <text x="144" y="407" class="mono" font-size="12" font-weight="700" fill="#58a6ff">+CONNECT</text>
+  <text x="254" y="407" class="mono" font-size="12" font-weight="700" fill="#58a6ff">LOW</text>
+  <text x="362" y="407" class="mono" font-size="12" fill="#e6edf3">4812</text>
+  <text x="440" y="407" class="mono" font-size="12" font-weight="700" fill="#ffffff">updater.exe</text>
+  <text x="612" y="407" class="mono" font-size="12" fill="#e6edf3">Opened outbound TCP 198.51.100.42:52377 -&gt; 203.0.113.99:443</text>
+  <text x="48" y="442" class="mono" font-size="12" fill="#e6edf3">14:20:41</text>
+  <text x="144" y="442" class="mono" font-size="12" font-weight="700" fill="#8b949e">-CLOSE</text>
+  <text x="254" y="442" class="mono" font-size="12" font-weight="700" fill="#10b981">SAFE</text>
+  <text x="362" y="442" class="mono" font-size="12" fill="#e6edf3">3190</text>
+  <text x="440" y="442" class="mono" font-size="12" font-weight="700" fill="#ffffff">code.exe</text>
+  <text x="612" y="442" class="mono" font-size="12" fill="#e6edf3">Closed outbound TCP 198.51.100.42:52340 -&gt; 198.51.100.200:443</text>
+  <line x1="36" y1="494" x2="1324" y2="494" stroke="#2b3644" stroke-width="1.0"/>
+  <text x="44" y="518" class="mono" font-size="12" fill="#8b949e">Headless CLI mode: safe_door_scanner --watch 5 --allowlist safe_door_allowlist.json</text>
+  <rect x="22" y="546" width="1316" height="112" rx="5" fill="#0e141b" stroke="#2b3644" stroke-width="1.3"/>
+  <rect x="36" y="538" width="109.60000000000001" height="16" fill="#0b0f14"/>
+  <text x="44" y="550" class="mono" font-size="12" font-weight="700" fill="#e6edf3">Event Details</text>
+  <text x="40" y="578" class="mono" font-size="12" fill="#8b949e">Event    :</text>
+  <text x="128" y="578" class="mono" font-size="12" font-weight="700" fill="#f85149">BEACON [CRITICAL]</text>
+  <text x="280" y="578" class="mono" font-size="12" fill="#8b949e">@ 2026-11-15 14:22:08</text>
+  <text x="40" y="604" class="mono" font-size="12" fill="#8b949e">Target   :</text>
+  <text x="128" y="604" class="mono" font-size="12" font-weight="700" fill="#10b981">203.0.113.99:443</text>
+  <text x="280" y="604" class="mono" font-size="12" fill="#ffffff">| Process: updater.exe (PID 4812)</text>
+  <text x="40" y="630" class="mono" font-size="12" fill="#8b949e">Summary  :</text>
+  <text x="128" y="630" class="mono" font-size="12" fill="#ffffff">H09-C2-BEACON: 5 outbound intervals observed (mean = 15.0s, std = 0.6s, CV = 0.04 &lt;= 0.20 threshold).</text>
+</svg>

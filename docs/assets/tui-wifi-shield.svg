@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1360 796" width="1360" height="796" role="img" aria-labelledby="title desc">
+  <title id="title">Unlatched TUI - Public Wi-Fi Shield Tab</title>
+  <desc id="desc">Wi-Fi Shield tab inspecting link encryption, CVE-2024-3661 VPN-bypass routes, firewall profile mismatch, local AI listeners, and rollback-capable firewall script export.</desc>
+  <defs>
+    <style>
+      .mono { font-family: "Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Consolas", ui-monospace, monospace; }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1360" height="796" rx="14" fill="#070b10"/>
+  <rect x="8" y="8" width="1344" height="780" rx="10" fill="#0b0f14" stroke="#1f2937" stroke-width="1.5"/>
+  <rect x="8" y="8" width="1344" height="36" rx="10" fill="#111822"/>
+  <rect x="8" y="28" width="1344" height="16" fill="#111822"/>
+  <line x1="8" y1="44" x2="1352" y2="44" stroke="#1f2937" stroke-width="1.2"/>
+  <circle cx="28" cy="26" r="5.5" fill="#ff5f56"/>
+  <circle cx="46" cy="26" r="5.5" fill="#ffbd2e"/>
+  <circle cx="64" cy="26" r="5.5" fill="#27c93f"/>
+  <text x="680.0" y="30" class="mono" font-size="12" font-weight="700" text-anchor="middle" fill="#8b949e">safe_door_scanner --wifi-shield</text>
+  <rect x="22" y="56" width="1316" height="46" rx="5" fill="#0e141b" stroke="#10b981" stroke-width="1.3"/>
+  <rect x="34" y="66" width="108" height="26" rx="4" fill="#10b981"/>
+  <text x="88.0" y="83.68" class="mono" font-size="13" font-weight="700" text-anchor="middle" fill="#06100c">UNLATCHED</text>
+  <rect x="150" y="66" width="118" height="26" rx="4" fill="#10b981"/>
+  <text x="209.0" y="83.32" class="mono" font-size="12" font-weight="700" text-anchor="middle" fill="#06100c">[ADMIN/ROOT]</text>
+  <text x="282" y="84" class="mono" font-size="13" font-weight="700" fill="#ffffff">Host: demo-workstation (Windows 11)</text>
+  <text x="584" y="84" class="mono" font-size="13" fill="#8b949e">| Score:</text>
+  <text x="658" y="84" class="mono" font-size="13" font-weight="700" fill="#f85149">64/100 [D]</text>
+  <text x="756" y="84" class="mono" font-size="13" fill="#8b949e">| Scan: 39ms (3s) @ 14:22:08</text>
+  <text x="1002" y="84" class="mono" font-size="13" font-weight="700" fill="#10b981">| Allowlisted: 2</text>
+  <rect x="22" y="112" width="1316" height="44" rx="5" fill="#0e141b" stroke="#2b3644" stroke-width="1.3"/>
+  <rect x="1158.6" y="148" width="163.4" height="16" fill="#0b0f14"/>
+  <text x="1166.6" y="160" class="mono" font-size="11" fill="#8b949e">View: Wi-Fi Checks (7)</text>
+  <text x="42" y="139" class="mono" font-size="12" fill="#8b949e">[1] Overview</text>
+  <text x="190" y="139" class="mono" font-size="12" fill="#8b949e">[2] Connections</text>
+  <text x="307.5" y="139" class="mono" font-size="12" font-weight="700" fill="#10b981">(84)</text>
+  <text x="378" y="139" class="mono" font-size="12" fill="#8b949e">[3] Findings</text>
+  <text x="473.0" y="139" class="mono" font-size="12" font-weight="700" fill="#f85149">(7)</text>
+  <text x="538" y="139" class="mono" font-size="12" fill="#8b949e">[4] Audit</text>
+  <text x="610.5" y="139" class="mono" font-size="12" font-weight="700" fill="#d29922">(14)</text>
+  <text x="684" y="139" class="mono" font-size="12" fill="#8b949e">[5] Processes</text>
+  <text x="786.5" y="139" class="mono" font-size="12" font-weight="700" fill="#8b949e">(112)</text>
+  <text x="860" y="139" class="mono" font-size="12" fill="#8b949e">[6] Events</text>
+  <text x="940.0" y="139" class="mono" font-size="12" font-weight="700" fill="#58a6ff">(7)</text>
+  <rect x="1000" y="121" width="198" height="26" rx="4" fill="#10b981"/>
+  <text x="1099.0" y="138.32" class="mono" font-size="12" font-weight="700" text-anchor="middle" fill="#06100c">[7] Wi-Fi Shield (52/F)</text>
+  <rect x="24" y="756" width="56" height="22" rx="4" fill="#10b981"/>
+  <text x="52.0" y="770.96" class="mono" font-size="11" font-weight="700" text-anchor="middle" fill="#06100c">INFO</text>
+  <text x="90" y="771" class="mono" font-size="12" font-weight="700" fill="#ffffff">Wrote rollback-capable firewall script to safe_door_wifi_lockdown.ps1 (run -Rollback to undo)</text>
+  <rect x="22" y="168" width="1316" height="118" rx="5" fill="#0e141b" stroke="#10b981" stroke-width="1.3"/>
+  <rect x="36" y="160" width="232.0" height="16" fill="#0b0f14"/>
+  <text x="44" y="172" class="mono" font-size="12" font-weight="700" fill="#10b981">Public Wi-Fi &amp; MitM Link Radar</text>
+  <text x="40" y="196" class="mono" font-size="12" fill="#8b949e">SSID:</text>
+  <text x="88" y="196" class="mono" font-size="12" font-weight="700" fill="#ffffff">Airport_Free_WiFi</text>
+  <text x="236" y="196" class="mono" font-size="12" fill="#10b981">(BSSID 00:53:00:aa:bb:01 | 84% | 802.11ax 5 GHz)</text>
+  <text x="632" y="196" class="mono" font-size="12" fill="#8b949e">| Wi-Fi Safety:</text>
+  <text x="756" y="196" class="mono" font-size="12" font-weight="700" fill="#f85149">52/100 [F]</text>
+  <text x="40" y="220" class="mono" font-size="12" fill="#8b949e">Cipher:</text>
+  <text x="104" y="220" class="mono" font-size="12" font-weight="700" fill="#f85149">Open / None (Unencrypted)</text>
+  <text x="322" y="220" class="mono" font-size="12" fill="#8b949e">| Profile:</text>
+  <text x="408" y="220" class="mono" font-size="12" font-weight="700" fill="#f59e0b">Private (Mismatch on Guest SSID)</text>
+  <text x="682" y="220" class="mono" font-size="12" fill="#8b949e">| VPN:</text>
+  <text x="738" y="220" class="mono" font-size="12" font-weight="700" fill="#10b981">ACTIVE (wg0)</text>
+  <text x="40" y="244" class="mono" font-size="12" fill="#8b949e">L3 Link:</text>
+  <text x="112" y="244" class="mono" font-size="12" fill="#e6edf3">198.51.100.42/24 -&gt; Gateway 198.51.100.1 (MAC 00:53:00:aa:bb:01) | DNS: 198.51.100.1</text>
+  <text x="40" y="268" class="mono" font-size="12" fill="#8b949e">Exposure:</text>
+  <text x="118" y="268" class="mono" font-size="12" font-weight="700" fill="#f85149">4 LAN listener(s) | 2 Local AI/MCP port(s) | 1 Cleartext socket(s)</text>
+  <text x="662" y="268" class="mono" font-size="12" font-weight="700" fill="#10b981">[Press &#x27;l&#x27; to write reversible firewall lockdown script]</text>
+  <rect x="22" y="298" width="1316" height="326" rx="5" fill="#0e141b" stroke="#10b981" stroke-width="1.3"/>
+  <rect x="36" y="290" width="196.0" height="16" fill="#0b0f14"/>
+  <text x="44" y="302" class="mono" font-size="12" font-weight="700" fill="#10b981">Wi-Fi Security Checks (7)</text>
+  <text x="50" y="326" class="mono" font-size="12" font-weight="700" fill="#10b981">STATUS</text>
+  <text x="130" y="326" class="mono" font-size="12" font-weight="700" fill="#10b981">CHECK ID</text>
+  <text x="238" y="326" class="mono" font-size="12" font-weight="700" fill="#10b981">CHECK CATEGORY</text>
+  <text x="484" y="326" class="mono" font-size="12" font-weight="700" fill="#10b981">RISK</text>
+  <text x="586" y="326" class="mono" font-size="12" font-weight="700" fill="#10b981">OBSERVED STATE</text>
+  <line x1="36" y1="336" x2="1324" y2="336" stroke="#2b3644" stroke-width="1.0"/>
+  <rect x="30" y="343" width="1300" height="26" rx="3" fill="#18222d"/>
+  <text x="34" y="360" class="mono" font-size="12" font-weight="700" fill="#10b981">&gt;</text>
+  <text x="50" y="360" class="mono" font-size="12" font-weight="700" fill="#f85149">CRIT</text>
+  <text x="130" y="360" class="mono" font-size="12" fill="#8b949e">WIFI-06</text>
+  <text x="238" y="360" class="mono" font-size="12" font-weight="700" fill="#ffffff">TunnelVision VPN Bypass</text>
+  <text x="484" y="360" class="mono" font-size="12" font-weight="700" fill="#f85149">CRITICAL</text>
+  <text x="586" y="360" class="mono" font-size="12" fill="#e6edf3">DHCP /1 routes (0.0.0.0/1, 128.0.0.0/1) override wg0 tunnel (CVE-2024-3661)</text>
+  <text x="50" y="396" class="mono" font-size="12" font-weight="700" fill="#f85149">CRIT</text>
+  <text x="130" y="396" class="mono" font-size="12" fill="#8b949e">WIFI-01</text>
+  <text x="238" y="396" class="mono" font-size="12" font-weight="700" fill="#ffffff">802.11 Link Encryption</text>
+  <text x="484" y="396" class="mono" font-size="12" font-weight="700" fill="#f85149">CRITICAL</text>
+  <text x="586" y="396" class="mono" font-size="12" fill="#e6edf3">Open unencrypted radio link on &#x27;Airport_Free_WiFi&#x27; (no WPA2/WPA3/OWE)</text>
+  <text x="50" y="432" class="mono" font-size="12" font-weight="700" fill="#f59e0b">WARN</text>
+  <text x="130" y="432" class="mono" font-size="12" fill="#8b949e">WIFI-07</text>
+  <text x="238" y="432" class="mono" font-size="12" font-weight="700" fill="#ffffff">Local AI &amp; MCP Ports</text>
+  <text x="484" y="432" class="mono" font-size="12" font-weight="700" fill="#f59e0b">HIGH</text>
+  <text x="586" y="432" class="mono" font-size="12" fill="#e6edf3">ollama.exe (0.0.0.0:11434), node.exe MCP (0.0.0.0:3000) reachable on subnet</text>
+  <text x="50" y="468" class="mono" font-size="12" font-weight="700" fill="#f59e0b">WARN</text>
+  <text x="130" y="468" class="mono" font-size="12" fill="#8b949e">WIFI-03</text>
+  <text x="238" y="468" class="mono" font-size="12" font-weight="700" fill="#ffffff">Firewall Profile Scope</text>
+  <text x="484" y="468" class="mono" font-size="12" font-weight="700" fill="#f59e0b">HIGH</text>
+  <text x="586" y="468" class="mono" font-size="12" fill="#e6edf3">Active profile is &#x27;Private&#x27; on untrusted Wi-Fi; inbound LAN rules relaxed</text>
+  <text x="50" y="504" class="mono" font-size="12" font-weight="700" fill="#f59e0b">WARN</text>
+  <text x="130" y="504" class="mono" font-size="12" fill="#8b949e">WIFI-05</text>
+  <text x="238" y="504" class="mono" font-size="12" font-weight="700" fill="#ffffff">DNS Resolver Privacy</text>
+  <text x="484" y="504" class="mono" font-size="12" font-weight="700" fill="#d29922">MEDIUM</text>
+  <text x="586" y="504" class="mono" font-size="12" fill="#e6edf3">Gateway resolver 198.51.100.1 active; no encrypted public DoH/DoT server</text>
+  <text x="50" y="540" class="mono" font-size="12" font-weight="700" fill="#f59e0b">WARN</text>
+  <text x="130" y="540" class="mono" font-size="12" fill="#8b949e">WIFI-08</text>
+  <text x="238" y="540" class="mono" font-size="12" font-weight="700" fill="#ffffff">Cleartext Outbound Traffic</text>
+  <text x="484" y="540" class="mono" font-size="12" font-weight="700" fill="#d29922">MEDIUM</text>
+  <text x="586" y="540" class="mono" font-size="12" fill="#e6edf3">curl.exe -&gt; 203.0.113.25:80 (HTTP) sending unencrypted payload over Wi-Fi</text>
+  <text x="50" y="576" class="mono" font-size="12" font-weight="700" fill="#10b981">PASS</text>
+  <text x="130" y="576" class="mono" font-size="12" fill="#8b949e">WIFI-02</text>
+  <text x="238" y="576" class="mono" font-size="12" font-weight="700" fill="#ffffff">ARP Gateway Uniqueness</text>
+  <text x="484" y="576" class="mono" font-size="12" font-weight="700" fill="#10b981">SAFE</text>
+  <text x="586" y="576" class="mono" font-size="12" fill="#e6edf3">Gateway MAC 00:53:00:aa:bb:01 is unique across 19 local ARP cache entries</text>
+  <rect x="22" y="636" width="1316" height="112" rx="5" fill="#0e141b" stroke="#2b3644" stroke-width="1.3"/>
+  <rect x="36" y="628" width="217.6" height="16" fill="#0b0f14"/>
+  <text x="44" y="640" class="mono" font-size="12" font-weight="700" fill="#e6edf3">Selected Check &amp; Remediation</text>
+  <text x="40" y="668" class="mono" font-size="12" fill="#8b949e">Check    :</text>
+  <text x="128" y="668" class="mono" font-size="12" font-weight="700" fill="#f85149">[CRIT] TunnelVision VPN Bypass (WIFI-06)</text>
+  <text x="40" y="694" class="mono" font-size="12" fill="#8b949e">Evidence :</text>
+  <text x="128" y="694" class="mono" font-size="12" fill="#ffffff">Non-VPN interface &#x27;Wi-Fi&#x27; holds 0.0.0.0/1 and 128.0.0.0/1 routes via 198.51.100.1 while wg0 is up.</text>
+  <text x="40" y="720" class="mono" font-size="12" fill="#8b949e">Action   :</text>
+  <text x="128" y="720" class="mono" font-size="12" fill="#10b981">Enable VPN kill-switch firewall rules blocking non-tunnel egress, or disconnect from this SSID.</text>
+</svg>

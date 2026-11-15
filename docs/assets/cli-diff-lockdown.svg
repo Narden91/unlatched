@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1360 520" width="1360" height="520" role="img" aria-labelledby="title desc">
+  <title id="title">Unlatched CLI - Baseline Diff, SARIF Export &amp; Reversible Wi-Fi Lockdown</title>
+  <desc id="desc">One-shot CLI output showing baseline diff listener escalation, SHA-256 binary modification detection, SARIF 2.1.0 report export, and rollback-capable firewall script generation.</desc>
+  <defs>
+    <style>
+      .mono { font-family: "Cascadia Mono", "Cascadia Code", "JetBrains Mono", "Consolas", ui-monospace, monospace; }
+    </style>
+  </defs>
+  <rect x="0" y="0" width="1360" height="520" rx="14" fill="#070b10"/>
+  <rect x="8" y="8" width="1344" height="504" rx="10" fill="#0b0f14" stroke="#1f2937" stroke-width="1.5"/>
+  <rect x="8" y="8" width="1344" height="36" rx="10" fill="#111822"/>
+  <rect x="8" y="28" width="1344" height="16" fill="#111822"/>
+  <line x1="8" y1="44" x2="1352" y2="44" stroke="#1f2937" stroke-width="1.2"/>
+  <circle cx="28" cy="26" r="5.5" fill="#ff5f56"/>
+  <circle cx="46" cy="26" r="5.5" fill="#ffbd2e"/>
+  <circle cx="64" cy="26" r="5.5" fill="#27c93f"/>
+  <text x="680.0" y="30" class="mono" font-size="12" font-weight="700" text-anchor="middle" fill="#8b949e">PowerShell 7 - Unlatched One-Shot CLI &amp; Baseline Diff</text>
+  <text x="32" y="74" class="mono" font-size="12" font-weight="700" fill="#10b981">PS C:\Tools\Unlatched&gt; .\safe_door_scanner.exe --cli --flagged --diff baseline.json --export-sarif results.sarif.json</text>
+  <text x="32" y="97" class="mono" font-size="12" font-weight="700" fill="#ffffff">UNLATCHED  Host: demo-workstation (Windows 11)  |  Privilege: ADMIN/ROOT  |  Score: 64/100 [D]</text>
+  <text x="32" y="120" class="mono" font-size="12" fill="#8b949e">Sockets: 84 active (12 listening, 51 established, 8 public)  |  Suppressed by SHA-256 allowlist: 2</text>
+  <text x="32" y="166" class="mono" font-size="12" font-weight="700" fill="#10b981">=== BASELINE DIFF vs baseline.json ===</text>
+  <text x="32" y="189" class="mono" font-size="12" font-weight="700" fill="#f85149">  [SCOPE ESCALATED]  TCP 127.0.0.1:11434 -&gt; 0.0.0.0:11434  ollama.exe (Loopback widened to Wildcard)</text>
+  <text x="32" y="212" class="mono" font-size="12" font-weight="700" fill="#f85149">  [BINARY MODIFIED]  C:\Users\analyst\AppData\Local\Temp\updater.exe  SHA-256 9f86d081... -&gt; e3b0c442...</text>
+  <text x="32" y="235" class="mono" font-size="12" font-weight="700" fill="#f59e0b">  [NEW LISTENER]     TCP 0.0.0.0:4040  ngrok.exe  (bridges 127.0.0.1:5432 -&gt; PROXY-EXP)</text>
+  <text x="32" y="258" class="mono" font-size="12" font-weight="700" fill="#f59e0b">  [NEW STARTUP]      HKCU\...\Run\UpdaterHelper -&gt; C:\Users\analyst\AppData\Local\Temp\updater.exe</text>
+  <text x="32" y="304" class="mono" font-size="12" font-weight="700" fill="#10b981">=== FLAGGED CONNECTIONS (4) ===</text>
+  <text x="32" y="327" class="mono" font-size="12" fill="#f85149">  CRITICAL  TCP 198.51.100.42:52419 -&gt; 203.0.113.99:443   PID 4812  updater.exe   [PE OriginalFilename: PowerShell.EXE]</text>
+  <text x="32" y="350" class="mono" font-size="12" fill="#f59e0b">  HIGH      TCP 127.0.0.1:5432      -&gt; 0.0.0.0:0          PID 2910  postgres.exe  [H08-PROXY-EXPOSURE via ngrok.exe]</text>
+  <text x="32" y="373" class="mono" font-size="12" fill="#f59e0b">  HIGH      TCP 0.0.0.0:11434       -&gt; 0.0.0.0:0          PID 7320  ollama.exe    [H10-WIFI-SHADOW-AI on guest SSID]</text>
+  <text x="32" y="419" class="mono" font-size="12" font-weight="700" fill="#10b981">[+] Wrote OASIS SARIF v2.1.0 report to results.sarif.json (exit code: 2 - Critical findings present)</text>
+  <text x="32" y="465" class="mono" font-size="12" font-weight="700" fill="#10b981">PS C:\Tools\Unlatched&gt; .\safe_door_scanner.exe --wifi-shield --export-lockdown wifi_lockdown.ps1</text>
+  <text x="32" y="488" class="mono" font-size="12" font-weight="700" fill="#10b981">[+] Wrote 7-bit ASCII firewall script to wifi_lockdown.ps1 (inspect first; run .\wifi_lockdown.ps1 -Rollback to undo)</text>
+</svg>
