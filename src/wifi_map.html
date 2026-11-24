@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unlatched · Wi-Fi map</title>
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:dark;--bg:#101417;--panel:#171d21;--line:#303a40;--text:#e7edeb;--muted:#a4b2b4;--accent:#d7ed9b;--blue:#83bcd4;--green:#88cbb3;--orange:#ebbb80}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}button,input{font:inherit}button{cursor:pointer}button:disabled{cursor:wait;opacity:.45}button:focus-visible,input:focus-visible,canvas:focus-visible{outline:2px solid var(--accent);outline-offset:3px}button{background:transparent;border:1px solid var(--line);border-radius:5px;color:var(--text);padding:9px 14px}button:hover:enabled{border-color:var(--muted);background:#222b30}.primary{color:#172016;background:var(--accent);border-color:var(--accent);font-weight:650}.primary:hover:enabled{background:#e2f4b6;color:#172016}.eyebrow{font:11px/1.4 ui-monospace,Consolas,monospace;letter-spacing:1.4px;text-transform:uppercase;color:var(--muted)}.mono{font-family:ui-monospace,Consolas,monospace}.muted{color:var(--muted)}header{height:78px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 32px;gap:20px}.brand{display:flex;align-items:center;gap:13px}.mark{height:28px;width:24px;border:2px solid var(--accent);border-right:0;position:relative}.mark:after{content:"";position:absolute;width:9px;height:2px;right:-3px;top:12px;background:var(--accent)}.wordmark{font-size:17px;font-weight:750;letter-spacing:2px}.brand .eyebrow{margin-left:20px;padding-left:20px;border-left:1px solid var(--line)}.actions{display:flex;align-items:center;gap:10px}.local-badge{font-size:12px;color:var(--green);margin-right:12px}.local-badge:before{content:"";display:inline-block;width:6px;height:6px;background:var(--green);border-radius:50%;margin-right:7px}main{max-width:1600px;margin:auto;padding:27px 32px 20px}.intro{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:23px}h1{font-weight:500;letter-spacing:-1px;font-size:29px;line-height:1.25;margin:6px 0}p{margin:7px 0}.status{font-size:12px;color:var(--muted);text-align:right}.stats{border:1px solid var(--line);border-radius:6px;display:grid;grid-template-columns:2fr repeat(3,1fr);margin-bottom:20px;background:var(--panel)}.stat{padding:17px 22px;min-width:0}.stat+.stat{border-left:1px solid var(--line)}.stat-value{font-size:23px;font-weight:500;letter-spacing:-.5px;margin-top:4px;overflow-wrap:anywhere}.stat-value.small{font-size:17px}.stat-sub{font-size:12px;color:var(--muted);margin-top:3px}.workspace{display:grid;grid-template-columns:minmax(0,1fr) 350px;gap:20px}.map-panel{border:1px solid var(--line);border-radius:6px;overflow:hidden;background:#12191d;position:relative}.panel-head{padding:15px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:12px}.panel-title{font-size:13px;font-weight:600}.tag{font:10px/1.4 ui-monospace,Consolas,monospace;letter-spacing:1px;border:1px solid #766442;color:var(--orange);padding:4px 7px;border-radius:3px;white-space:nowrap}.scene{height:490px;min-height:360px;position:relative}canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}canvas:active{cursor:grabbing}.scene-label{position:absolute;top:17px;left:20px;pointer-events:none;max-width:240px;font-size:11px;color:var(--muted)}.scene-empty{position:absolute;top:45%;left:12%;right:12%;text-align:center;pointer-events:none;color:var(--muted)}.scene-empty strong{display:block;color:var(--text);font-weight:500;font-size:18px;margin-bottom:5px}.controls{position:absolute;right:16px;bottom:17px;display:flex;gap:5px}.controls button{padding:5px 11px;background:#171f25;font-size:16px}.controls button:last-child{font-size:12px}.legend{display:flex;flex-wrap:wrap;gap:19px;padding:13px 18px;border-top:1px solid var(--line);font-size:11px;color:var(--muted)}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px}.hint{font-size:11px;color:var(--muted);padding:0 18px 13px}.sidebar{border:1px solid var(--line);border-radius:6px;background:var(--panel);display:flex;flex-direction:column;max-height:620px}.search{padding:12px;border-bottom:1px solid var(--line)}input[type=search]{width:100%;border:1px solid var(--line);border-radius:4px;padding:9px 11px;background:var(--bg);color:var(--text)}#device-list{overflow:auto;flex:1;min-height:125px;max-height:255px;padding:5px}.device{width:100%;border:1px solid transparent;border-radius:4px;text-align:left;display:flex;gap:11px;align-items:center;padding:11px;margin:2px 0}.device[aria-pressed=true]{background:#26312a;border-color:#697c4d}.device-symbol{width:29px;height:29px;display:grid;place-items:center;background:#242f35;border-radius:5px;color:var(--blue);font-size:15px}.device-name{font-weight:500;overflow-wrap:anywhere}.device-sub{font-size:11px;color:var(--muted)}.device-copy{min-width:0}.device-role{margin-left:auto;font-size:10px;color:var(--muted)}#details{border-top:1px solid var(--line);padding:16px 18px;font-size:12px;overflow:auto;min-height:210px}#details h2{font-size:16px;font-weight:500;margin:0 0 12px;overflow-wrap:anywhere}dl{display:grid;grid-template-columns:78px minmax(0,1fr);gap:7px;margin:0}dt{color:var(--muted)}dd{margin:0;overflow-wrap:anywhere}.evidence{padding-top:12px;color:var(--muted);font-size:11px}#warnings{margin-top:17px;border-left:2px solid #776849;padding:1px 0 1px 13px;font-size:12px;color:var(--muted)}#warnings p{margin:5px 0}#error{color:#ffd0b6;background:#30241e;border:1px solid #73513d;border-radius:4px;padding:12px;margin-bottom:15px}footer{display:flex;justify-content:space-between;gap:15px;margin-top:18px;color:var(--muted);font-size:11px}#list-empty{padding:22px 12px;color:var(--muted);font-size:12px}.sr-only{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}[hidden]{display:none!important}
+@media(max-width:1050px){.workspace{grid-template-columns:minmax(0,1fr) 300px}.scene{height:470px}.stat{padding:15px}.local-badge{display:none}}
+@media(max-width:780px){header{padding:15px 18px;height:auto;flex-wrap:wrap}.brand .eyebrow{margin-left:5px;padding-left:10px}main{padding:20px 16px}.intro{align-items:start;flex-direction:column;gap:8px}.status{text-align:left}.stats{grid-template-columns:1fr 1fr}.stat:nth-child(3){border-left:0;border-top:1px solid var(--line)}.stat:nth-child(4){border-top:1px solid var(--line)}.workspace{grid-template-columns:1fr}.scene{height:400px}.sidebar{max-height:none}#device-list{max-height:260px}footer{flex-direction:column;gap:4px}.actions{width:100%}.actions button{flex:1}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="mark" aria-hidden="true"></span><span class="wordmark">UNLATCHED</span><span class="eyebrow">Wi-Fi map</span></div>
+  <div class="actions"><span class="local-badge">Local session</span><button id="refresh" disabled>Refresh cache</button><button id="scan" class="primary" disabled>Scan network <span aria-hidden="true">↗</span></button></div>
+</header>
+<main>
+  <div class="intro"><div><div class="eyebrow">Network observatory / 01</div><h1>Your network, in view.</h1><p class="muted">Explore discovered devices and the evidence behind them.</p></div><div class="status" id="status" role="status" aria-live="polite">Reading local Wi-Fi telemetry…</div></div>
+  <div id="error" role="alert" hidden></div>
+  <section class="stats" aria-label="Network overview">
+    <div class="stat"><div class="eyebrow">Connected Wi-Fi</div><div class="stat-value" id="ssid">—</div><div class="stat-sub mono" id="interface">Waiting for interface</div></div>
+    <div class="stat"><div class="eyebrow">Visible devices</div><div class="stat-value" id="count">—</div><div class="stat-sub">Includes this computer</div></div>
+    <div class="stat"><div class="eyebrow">Fresh peer replies</div><div class="stat-value" id="replies">—</div><div class="stat-sub">ICMP replies in the last scan</div></div>
+    <div class="stat"><div class="eyebrow">Physical distance</div><div class="stat-value small">Unavailable</div><div class="stat-sub">No ranging measurements</div></div>
+  </section>
+  <div class="workspace">
+    <section class="map-panel" aria-label="Schematic 3D network map">
+      <div class="panel-head"><span class="panel-title">Device constellation</span><span class="tag">SCHEMATIC · NOT TO SCALE</span></div>
+      <div class="scene">
+        <canvas id="map" tabindex="0" aria-label="Interactive 3D schematic. Drag or use arrow keys to rotate; plus and minus to zoom. Select devices using the list."></canvas>
+        <div class="scene-label">Layout spacing has no physical meaning.<br>Device positions and bearings are unknown.</div>
+        <div class="scene-empty" id="scene-empty"><strong>Waiting for a network</strong>Your Wi-Fi interface and cached neighbors will appear here.</div>
+        <div class="controls" aria-label="Map view controls"><button id="zoom-out" aria-label="Zoom out">−</button><button id="zoom-in" aria-label="Zoom in">+</button><button id="reset" aria-label="Reset map view">Reset view</button></div>
+      </div>
+      <div class="legend"><span><i class="dot" style="background:var(--accent)"></i>This computer</span><span><i class="dot" style="background:var(--green)"></i>Gateway</span><span><i class="dot" style="background:var(--blue)"></i>Peer</span><span><i class="dot" style="background:#8c9aa2"></i>Unknown type</span></div>
+      <div class="hint">Drag to orbit · Scroll to zoom · Click a device to inspect. Links show discovery relationships; forwarding paths are unknown.</div>
+    </section>
+    <aside class="sidebar" aria-label="Devices and details">
+      <div class="panel-head"><span class="panel-title">Devices</span><span class="eyebrow" id="list-count">0 visible</span></div>
+      <div class="search"><label class="sr-only" for="search">Search devices by name, type, IP or MAC</label><input id="search" type="search" placeholder="Filter name, type or address…" autocomplete="off"></div>
+      <div id="device-list"></div>
+      <section id="details" aria-label="Selected device"><p class="muted">Select a device to inspect its identity, discovery source, and type evidence.</p></section>
+    </aside>
+  </div>
+  <section id="warnings" aria-label="Measurement limitations"><p>3D placement is schematic. A normal Wi-Fi scan does not measure physical device distances.</p><p>Scan network sends one ICMP probe per peer address on the current IPv4 subnet, with at most 254 hosts. Use it on networks you own or administer.</p></section>
+  <footer><span>No cloud services · No external assets · Data held in this session</span><span id="updated">Refresh cache reads local telemetry without probing peers.</span></footer>
+</main>
+<script nonce="unlatched-map">
+'use strict';
+const $ = id => document.getElementById(id);
+const canvas = $('map'), ctx = canvas.getContext('2d');
+let report = null, selected = null, nodes = [], hits = [], busy = true, pending = false;
+let yaw = -.28, pitch = .5, zoom = 1, drag = null, moved = false;
+const colors = {local:'#d7ed9b', gateway:'#88cbb3', peer:'#83bcd4', unknown:'#8c9aa2'};
+const roleLabel = role => ({local:'This computer', gateway:'Gateway', peer:'LAN peer'}[role] || 'LAN peer');
+const typeLabel = device => device.role === 'peer' && device.kind !== 'Unknown' ? `Likely ${device.kind}` : device.kind;
+const color = device => colors[device.role === 'peer' && device.kind === 'Unknown' ? 'unknown' : device.role] || colors.peer;
+const title = device => device.hostname || (device.role === 'local' ? 'This computer' : device.role === 'gateway' ? 'Default gateway' : device.ip);
+function element(tag, text, className) {
+  const node = document.createElement(tag);
+  if (text !== undefined) node.textContent = text;
+  if (className) node.className = className;
+  return node;
+}
+function setError(message) { $('error').textContent = message || ''; $('error').hidden = !message; }
+function updateButtons() {
+  $('scan').disabled = busy || pending || !report?.can_scan;
+  $('refresh').disabled = busy || pending;
+  $('scan').textContent = busy ? 'Reading network…' : 'Scan network ↗';
+}
+async function api(path, method = 'GET') {
+  const response = await fetch(path, {method, headers:{'X-Unlatched-Map':'1'}, cache:'no-store'});
+  if (!response.ok) {
+    let detail = `Request failed (${response.status})`;
+    try { detail = (await response.json()).error || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  return response.json();
+}
+async function poll() {
+  try {
+    const state = await api('/api/state');
+    busy = state.busy;
+    setError(state.error ? `${state.error}${report ? ' Showing previous results.' : ''}` : null);
+    if (state.report && state.report.scanned_at !== report?.scanned_at) applyReport(state.report);
+    $('status').textContent = busy ? 'Reading network… the view remains available.' : state.error ? 'Discovery could not complete. Try Refresh cache.' : report?.active ? 'Scan complete · only fresh replies confirm reachability' : 'Cached view · press Scan network to discover peers';
+    updateButtons();
+  } catch (error) {
+    busy = false;
+    setError(`${error.message}. Check that --wifi-map is still running.`);
+    $('status').textContent = 'Local service unavailable';
+    updateButtons();
+  } finally { window.setTimeout(poll, busy ? 1000 : 4000); }
+}
+async function requestScan(active) {
+  if (busy || pending) return;
+  pending = true; updateButtons(); setError(null);
+  try {
+    await api(active ? '/api/scan' : '/api/refresh', 'POST');
+    busy = true;
+    $('status').textContent = active ? 'Scanning the current subnet…' : 'Refreshing local telemetry…';
+  } catch (error) { setError(error.message); }
+  finally { pending = false; updateButtons(); }
+}
+function applyReport(data) {
+  report = data;
+  $('ssid').textContent = data.ssid || 'Not connected';
+  $('interface').textContent = [data.interface, data.local_ip ? `${data.local_ip}/${data.prefix ?? '?'}` : null].filter(Boolean).join(' · ') || 'No interface available';
+  $('count').textContent = data.devices.length;
+  $('replies').textContent = data.active ? data.devices.filter(d => d.observation === 'ICMP reply this scan').length : '—';
+  $('updated').textContent = `${data.active ? 'Scanned' : 'Cache read'} ${new Date(data.scanned_at).toLocaleTimeString()} · ${(data.elapsed_ms / 1000).toFixed(1)} s`;
+  $('warnings').replaceChildren(...data.warnings.map(text => element('p', text)), element('p', 'Scan network sends one ICMP probe per peer address on the current IPv4 subnet, with at most 254 hosts. Use it on networks you own or administer.'));
+  const peers = data.devices.filter(d => d.role !== 'local');
+  nodes = data.devices.map(device => {
+    if (device.role === 'local') return {device, x:0, y:0, z:0};
+    const index = peers.indexOf(device), angle = index * 2.399963229728653;
+    const radius = 1.65 + Math.sqrt(index + 1) * .44;
+    return {device, x:Math.cos(angle)*radius, y:((index % 3)-1)*.45, z:Math.sin(angle)*radius};
+  });
+  const maxRadius = Math.max(3.2, ...nodes.map(n => Math.hypot(n.x,n.z)));
+  nodes.forEach(n => { n.x *= 3.2/maxRadius; n.z *= 3.2/maxRadius; });
+  if (!data.devices.some(d => d.ip === selected)) selected = data.devices.find(d => d.role === 'local')?.ip || data.devices[0]?.ip || null;
+  $('scene-empty').hidden = nodes.length > 0;
+  renderList(); renderDetails(); draw();
+}
+function select(ip) { selected = ip; renderList(); renderDetails(); draw(); }
+function renderList() {
+  const query = $('search').value.trim().toLowerCase();
+  const devices = (report?.devices || []).filter(d => [d.ip,d.mac,d.hostname,d.kind,roleLabel(d.role)].some(v => (v || '').toLowerCase().includes(query)));
+  $('list-count').textContent = `${devices.length} visible`;
+  $('device-list').replaceChildren();
+  if (!devices.length) { $('device-list').append(element('p', report ? 'No matching devices.' : 'Waiting for local telemetry…', 'muted')); return; }
+  for (const device of devices) {
+    const button = element('button', undefined, 'device');
+    button.type = 'button'; button.setAttribute('aria-pressed', String(device.ip === selected));
+    const symbol = element('span', device.role === 'local' ? '⌂' : device.role === 'gateway' ? '◇' : '•', 'device-symbol');
+    symbol.style.color = color(device); symbol.setAttribute('aria-hidden','true');
+    const copy = element('div', undefined, 'device-copy');
+    copy.append(element('div', title(device), 'device-name'), element('div', `${device.ip} · ${typeLabel(device)}`, 'device-sub'));
+    button.append(symbol, copy);
+    if (device.role !== 'peer') button.append(element('span', device.role === 'local' ? 'YOU' : 'ROUTE', 'device-role'));
+    button.addEventListener('click', () => select(device.ip));
+    $('device-list').append(button);
+  }
+}
+function renderDetails() {
+  const device = report?.devices.find(d => d.ip === selected);
+  $('details').replaceChildren();
+  if (!device) { $('details').append(element('p','Select a device to inspect it.','muted')); return; }
+  const dl = element('dl');
+  for (const [key,value] of [
+    ['Role',roleLabel(device.role)], ['IPv4',device.ip], ['MAC',device.mac || 'Unavailable'],
+    ['Type',typeLabel(device)], ['Observed',device.observation], ['Distance','Unavailable'], ['Position','Unknown · schematic placement']
+  ]) dl.append(element('dt',key), element('dd',value));
+  $('details').append(element('h2',title(device)), dl, element('p',device.evidence,'evidence'));
+}
+function project(x,y,z,w,h) {
+  const rx = x*Math.cos(yaw)-z*Math.sin(yaw), rz=x*Math.sin(yaw)+z*Math.cos(yaw);
+  const ry=y*Math.cos(pitch)-rz*Math.sin(pitch), depth=y*Math.sin(pitch)+rz*Math.cos(pitch);
+  const scale=Math.min(w,h)*1.3*zoom/(10+depth);
+  return {x:w/2+rx*scale, y:h*.52-ry*scale, scale, depth};
+}
+function draw() {
+  if (!ctx) return;
+  const bounds=canvas.getBoundingClientRect(), w=bounds.width, h=bounds.height;
+  const ratio=Math.min(window.devicePixelRatio || 1,2);
+  if (canvas.width !== Math.round(w*ratio) || canvas.height !== Math.round(h*ratio)) { canvas.width=Math.round(w*ratio); canvas.height=Math.round(h*ratio); }
+  ctx.setTransform(ratio,0,0,ratio,0,0); ctx.clearRect(0,0,w,h); hits=[];
+  ctx.lineWidth=1;
+  for (let i=-5;i<=5;i++) {
+    for (const ends of [[i,-5,i,5],[-5,i,5,i]]) {
+      const a=project(ends[0],-.8,ends[1],w,h), b=project(ends[2],-.8,ends[3],w,h);
+      ctx.strokeStyle=i===0?'#304047':'#202d33';ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+    }
+  }
+  const center=project(0,0,0,w,h);
+  ctx.setLineDash([3,6]);ctx.strokeStyle='#43545d';
+  for (const node of nodes.filter(n=>n.device.role!=='local')) {
+    const p=project(node.x,node.y,node.z,w,h);
+    ctx.beginPath();ctx.moveTo(center.x,center.y);ctx.lineTo(p.x,p.y);ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  const ordered=nodes.map(n=>({...n,p:project(n.x,n.y,n.z,w,h)})).sort((a,b)=>b.p.depth-a.p.depth);
+  for (const node of ordered) {
+    const {device,p}=node, chosen=device.ip===selected, radius=Math.max(5,Math.min(15,p.scale*.16));
+    if (chosen) { ctx.strokeStyle=color(device);ctx.lineWidth=1;ctx.beginPath();ctx.arc(p.x,p.y,radius+7,0,Math.PI*2);ctx.stroke(); }
+    ctx.fillStyle='#12191d';ctx.beginPath();ctx.arc(p.x,p.y,radius+2,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=color(device);ctx.beginPath();ctx.arc(p.x,p.y,radius,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='#182327';ctx.beginPath();ctx.arc(p.x-2,p.y-2,2,0,Math.PI*2);ctx.fill();
+    if (nodes.length<=32 || chosen || device.role!=='peer') {
+      const full=title(device), label=full.length>24?full.slice(0,22)+'…':full;
+      ctx.font=(chosen?'600 ':'')+'11px system-ui';ctx.textAlign='center';
+      const width=ctx.measureText(label).width;
+      ctx.fillStyle='#12191d';ctx.fillRect(p.x-width/2-5,p.y+radius+10,width+10,17);
+      ctx.fillStyle=chosen?'#e7edeb':'#a4b2b4';ctx.fillText(label,p.x,p.y+radius+22);
+    }
+    hits.push({ip:device.ip,x:p.x,y:p.y,r:Math.max(radius+7,15)});
+  }
+}
+function changeZoom(delta) { zoom=Math.max(.55,Math.min(1.8,zoom+delta));draw(); }
+$('scan').addEventListener('click',()=>requestScan(true));
+$('refresh').addEventListener('click',()=>requestScan(false));
+$('search').addEventListener('input',renderList);
+$('zoom-in').addEventListener('click',()=>changeZoom(.12));
+$('zoom-out').addEventListener('click',()=>changeZoom(-.12));
+$('reset').addEventListener('click',()=>{yaw=-.28;pitch=.5;zoom=1;draw();});
+canvas.addEventListener('pointerdown',event=>{drag={x:event.clientX,y:event.clientY,startX:event.clientX,startY:event.clientY};moved=false;canvas.setPointerCapture(event.pointerId);});
+canvas.addEventListener('pointermove',event=>{
+  if (!drag) return;
+  if (Math.hypot(event.clientX-drag.startX,event.clientY-drag.startY)>4) moved=true;
+  yaw+=(event.clientX-drag.x)*.008;pitch=Math.max(-.5,Math.min(1.2,pitch+(event.clientY-drag.y)*.008));
+  drag.x=event.clientX;drag.y=event.clientY;draw();
+});
+canvas.addEventListener('pointerup',event=>{
+  if (!drag) return;
+  if (!moved) {
+    const bounds=canvas.getBoundingClientRect(), x=event.clientX-bounds.left,y=event.clientY-bounds.top;
+    const hit=[...hits].reverse().find(p=>Math.hypot(p.x-x,p.y-y)<p.r);
+    if (hit) select(hit.ip);
+  }
+  drag=null;
+});
+canvas.addEventListener('pointercancel',()=>{drag=null;});
+canvas.addEventListener('wheel',event=>{event.preventDefault();changeZoom(event.deltaY<0?.06:-.06);},{passive:false});
+canvas.addEventListener('keydown',event=>{
+  if (event.key==='ArrowLeft') yaw-=.12;
+  else if (event.key==='ArrowRight') yaw+=.12;
+  else if (event.key==='ArrowUp') pitch=Math.min(1.2,pitch+.1);
+  else if (event.key==='ArrowDown') pitch=Math.max(-.5,pitch-.1);
+  else if (event.key==='+' || event.key==='=') changeZoom(.12);
+  else if (event.key==='-') changeZoom(-.12);
+  else return;
+  event.preventDefault();draw();
+});
+new ResizeObserver(draw).observe(canvas);
+renderList();draw();poll();
+</script>
+</body>
+</html>

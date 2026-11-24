@@ -6,6 +6,7 @@ mod models;
 mod report;
 mod scanner;
 mod ui;
+mod wifi_map;
 
 use allowlist::Allowlist;
 use app::{ActiveTab, App};
@@ -31,6 +32,10 @@ use std::time::Duration;
     about = "Unlatched: local socket, process provenance, and host persistence inspector"
 )]
 struct CliArgs {
+    /// Serve the local interactive Wi-Fi device map (Windows)
+    #[arg(long, exclusive = true)]
+    wifi_map: bool,
+
     /// Run a one-shot scan in the terminal instead of launching the TUI
     #[arg(short, long)]
     cli: bool,
@@ -82,6 +87,10 @@ struct CliArgs {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = CliArgs::parse();
+
+    if args.wifi_map {
+        return wifi_map::run().map_err(Into::into);
+    }
 
     // Fail on a bad baseline or allowlist before running the scan.
     let old_snapshot = args.diff.as_deref().map(baseline::load).transpose()?;

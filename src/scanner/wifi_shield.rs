@@ -895,7 +895,7 @@ impl WifiRadarState {
     }
 
     #[cfg(windows)]
-    fn collect_platform_telemetry(&mut self, is_elevated: bool) -> Option<RawLinkSnapshot> {
+    pub(crate) fn collect_platform_telemetry(&mut self, is_elevated: bool) -> Option<RawLinkSnapshot> {
         let sys_root = super::system_root();
         let sys32 = sys_root.join("System32");
 
@@ -948,7 +948,7 @@ impl WifiRadarState {
     }
 
     #[cfg(target_os = "linux")]
-    fn collect_platform_telemetry(&mut self, _is_elevated: bool) -> Option<RawLinkSnapshot> {
+    pub(crate) fn collect_platform_telemetry(&mut self, _is_elevated: bool) -> Option<RawLinkSnapshot> {
         let wireless_raw = read_proc_file("/proc/self/net/wireless").unwrap_or_default();
         let wireless_iface = wireless_raw
             .lines()
@@ -1018,7 +1018,7 @@ impl WifiRadarState {
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
-    fn collect_platform_telemetry(&mut self, _is_elevated: bool) -> Option<RawLinkSnapshot> {
+    pub(crate) fn collect_platform_telemetry(&mut self, _is_elevated: bool) -> Option<RawLinkSnapshot> {
         None
     }
 }

@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod device_discovery;
 pub mod fs_safe;
 pub mod heuristics;
 pub mod indicators;

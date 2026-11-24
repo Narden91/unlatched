@@ -22,7 +22,7 @@
 </p>
 
 > [!NOTE]
-> **Local-only and read-only by default.** Unlatched inspects only the machine where it runs, never scans remote hosts, and never modifies OS or firewall settings automatically. It flags patterns worth investigating rather than hard proof of compromise, so a clean run does not guarantee a system is secure.
+> **Local-only and read-only by default.** Default host-inspection modes inspect only the machine where Unlatched runs and never modify OS or firewall settings automatically. The optional `--wifi-map` interface offers explicit LAN discovery through its Scan network button. Findings flag patterns worth investigating rather than hard proof of compromise, so a clean run does not guarantee a system is secure.
 > *(All screenshots in this repository use RFC 5737 and RFC 7042 documentation addresses on a fictional `demo-workstation` host.)*
 
 ---
@@ -51,6 +51,44 @@
     </td>
   </tr>
 </table>
+
+## Interactive Wi-Fi device map (Windows)
+
+Run `cargo run --locked -- --wifi-map`, then open the printed `http://127.0.0.1:PORT/`
+address in your browser. The interface runs locally, needs no additional dependencies
+or external assets, and stops when you press Ctrl+C in the terminal.
+
+- Drag or use arrow keys to rotate the 3D view; scroll or use the zoom buttons to zoom.
+  Select a device in the map or searchable list to inspect its addresses and evidence.
+- **Refresh cache** reads the current Wi-Fi link and its IPv4 neighbor cache. Cache
+  entries may be stale. Loading the page does not probe peer devices.
+- **Scan network** explicitly sends one source-addressed ICMP echo request per peer
+  address on the current Wi-Fi subnet, with 16 workers and a 300 ms reply timeout.
+  Active discovery supports `/24` through `/30` subnets (at most 254 host addresses).
+  Larger subnets remain available as a cached view. Use active discovery on networks
+  you own or administer. Optional reverse DNS uses the configured system resolver;
+  unresolved names remain unknown. No ports are scanned.
+- Device type guesses use hostname tokens and include their evidence and low
+  confidence. Unknown types remain **Unknown**. The gateway label describes its
+  routing role, rather than identifying its hardware.
+- **The map is schematic, not a physical floor plan.** Positions, bearings, and
+  physical distances are unknown. Wi-Fi signal percentage describes the connection
+  to the access point; it is not a per-device range measurement. No RSSI or ping
+  timing is converted into meters. Physical mapping needs additional ranging or
+  measured position data, which this version does not collect.
+- Results can include wired devices and miss sleeping or isolated wireless clients.
+  A neighbor cache is not a complete router client list. A fresh ICMP reply confirms
+  reachability during that scan; lack of a reply does not prove absence.
+
+This mode is separate from the existing host inspection commands. It serves only
+the device map on the loopback interface and holds results in memory. If telemetry
+is unavailable, check WLAN AutoConfig and Windows Location access for desktop apps.
+The existing terminal and report modes retain their local-only behavior.
+
+Checks: `cargo test --locked --offline`. The optional browser regression check uses
+Node.js 22 or newer and an already installed Chromium browser, without npm packages:
+`node tests/wifi_map_browser.cjs "C:\path\to\chrome.exe"`. It uses fictional devices
+and writes desktop and mobile screenshots under `target/wifi-map-browser/`.
 
 ## Platform Status
 
